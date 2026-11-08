@@ -35,6 +35,7 @@ import android.view.WindowManager;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.RenderProcessGoneDetail;
+import android.webkit.WebBackForwardList;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
@@ -94,17 +95,22 @@ public class MainActivity extends Activity {
     private View menuPanel;
     private Button firstMenuButton;
     private Button menuCursorButton;
-    private TextView menuZoomLabel;
+    private Button menuZoomButton;
+    private Button menuPipButton;
     private Button menuUpdateButton;
     private Updater updater;
     private String availableUpdate;
     private boolean updateCheckDone;
+    private boolean updatePromptShown;
 
     private String tvJs = "";
     private boolean cursorMode;
     private int zoomIndex;
     private boolean firstPageShown;
     private long lastBackAt;
+    private final long[] backPresses = new long[3];
+    private String lastBackFromUrl;
+    private long lastBackNavAt;
     private int modalBackCount;
     private long lastModalBackAt;
     private boolean centerLongHandled;
@@ -218,8 +224,17 @@ public class MainActivity extends Activity {
     void onUpdateAvailable(String version) {
         availableUpdate = version;
         updateMenuLabels();
-        Toast.makeText(this, "Nouvelle version " + version
-                + " disponible : Menu (≡) > Installer la mise à jour", Toast.LENGTH_LONG).show();
+        if (updatePromptShown || isFinishing()) return;
+        updatePromptShown = true;
+        AlertDialog d = new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                .setTitle("Nouvelle version d'" + getString(R.string.app_name))
+                .setMessage("La version " + version + " est disponible.\n\nL'installer maintenant ? "
+                        + "(Tu pourras aussi le faire plus tard depuis Menu \u2261 > Installer la mise à jour.)")
+                .setPositiveButton("Installer", (x, w) -> updater.checkAndInstall())
+                .setNegativeButton("Plus tard", null)
+                .show();
+        Button b = d.getButton(AlertDialog.BUTTON_POSITIVE);
+        if (b != null) b.requestFocus();
     }
 
     @Override
@@ -996,6 +1011,9 @@ public class MainActivity extends Activity {
                 return true;
             }
             if (code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                if (down && menuZoomButton != null && menuZoomButton.hasFocus()) {
+                    changeZoom(code == KeyEvent.KEYCODE_DPAD_RIGHT ? 1 : -1);
+                }
                 return true; // le menu est une simple colonne : on garde le focus dedans
             }
             return super.dispatchKeyEvent(e);
@@ -1101,18 +1119,36 @@ public class MainActivity extends Activity {
     }
 
     private void handleBack() {
+        long now = SystemClock.uptimeMillis();
+        // Trois appuis rapides sur Retour : on quitte, où que l'on soit.
+        backPresses[0] = backPresses[1];
+        backPresses[1] = backPresses[2];
+        backPresses[2] = now;
+        if (backPresses[0] != 0 && now - backPresses[0] < 2500) {
+            finish();
+            return;
+        }
         if (customView != null) {
             exitCustomView(true);
             return;
         }
+        // La page répond normalement tout de suite ; si elle est bloquée, on n'attend pas.
+        final boolean[] handled = {false};
+        ui.postDelayed(() -> {
+            if (handled[0]) return;
+            handled[0] = true;
+            navigateBack();
+        }, 700);
         js("window.__tv.back()", result -> {
+            if (handled[0]) return;
+            handled[0] = true;
             JSONObject o = parse(result);
             String state = o == null ? "none" : o.optString("state", "none");
             if (state.equals("fullscreen")) return;
             if (state.equals("modal")) {
-                long now = SystemClock.uptimeMillis();
-                modalBackCount = (now - lastModalBackAt < 4000) ? modalBackCount + 1 : 1;
-                lastModalBackAt = now;
+                long t = SystemClock.uptimeMillis();
+                modalBackCount = (t - lastModalBackAt < 4000) ? modalBackCount + 1 : 1;
+                lastModalBackAt = t;
                 if (modalBackCount == 1) {
                     sendKey(KeyEvent.KEYCODE_ESCAPE);
                     return;
@@ -1121,16 +1157,59 @@ public class MainActivity extends Activity {
                     js("window.__tv.closeModal()", null);
                     return;
                 }
-                modalBackCount = 0; // la fenêtre résiste : on revient à la page précédente
-            } else {
-                modalBackCount = 0;
+                // Cette fenêtre ne se ferme pas (élément permanent du site) : on l'ignore désormais.
+                js("window.__tv.ignoreLayer()", null);
             }
-            if (web != null && web.canGoBack()) {
-                web.goBack();
-                return;
-            }
-            confirmExit();
+            modalBackCount = 0;
+            navigateBack();
         });
+    }
+
+    /** Page précédente, sans jamais rester coincé ; sur la page d'accueil, on propose de quitter. */
+    private void navigateBack() {
+        if (web == null || isAtStartPage()) {
+            confirmExit();
+            return;
+        }
+        long now = SystemClock.uptimeMillis();
+        String current = web.getUrl();
+        // Le retour précédent n'a rien changé (page qui renvoie toujours au même endroit).
+        if (current != null && current.equals(lastBackFromUrl) && now - lastBackNavAt < 6000) {
+            confirmExit();
+            return;
+        }
+        WebBackForwardList list = web.copyBackForwardList();
+        int index = list.getCurrentIndex();
+        int steps = -1;
+        // On saute les pages vides laissées par le lecteur TV.
+        while (index + steps >= 0 && list.getItemAtIndex(index + steps) != null
+                && "about:blank".equals(list.getItemAtIndex(index + steps).getUrl())) {
+            steps--;
+        }
+        if (index + steps < 0) {
+            confirmExit();
+            return;
+        }
+        lastBackFromUrl = current;
+        lastBackNavAt = now;
+        web.goBackOrForward(steps);
+    }
+
+    private boolean isAtStartPage() {
+        String u = web.getUrl();
+        return u == null || "about:blank".equals(u) || samePage(u, startUrl()) || samePage(u, DEFAULT_URL);
+    }
+
+    private static boolean samePage(String a, String b) {
+        return pageKey(a).equals(pageKey(b));
+    }
+
+    private static String pageKey(String u) {
+        Uri p = Uri.parse(u == null ? "" : u);
+        String host = p.getHost() == null ? "" : p.getHost().toLowerCase().replaceFirst("^www\\.", "");
+        String path = p.getPath() == null ? "" : p.getPath();
+        while (path.endsWith("/")) path = path.substring(0, path.length() - 1);
+        return host + path;
     }
 
     private void confirmExit() {
@@ -1140,7 +1219,7 @@ public class MainActivity extends Activity {
             return;
         }
         lastBackAt = now;
-        toast("Appuie encore sur Retour pour quitter");
+        toast("Appuie encore sur Retour pour quitter " + getString(R.string.app_name));
     }
 
     private void media(int code) {
@@ -1253,55 +1332,41 @@ public class MainActivity extends Activity {
     private View buildMenu() {
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
-        col.setPadding(dp(26), dp(28), dp(26), dp(24));
+        col.setPadding(dp(24), dp(22), dp(24), dp(18));
 
-        TextView title = label(getString(R.string.app_name), 28, true);
+        TextView title = label(getString(R.string.app_name), 26, true);
         col.addView(title);
-        TextView hint = label("Version " + Updater.currentVersion() + " — Retour pour fermer", 14, false);
+        TextView hint = label("Version " + Updater.currentVersion() + " \u2014 Retour pour fermer", 13, false);
         hint.setTextColor(0xFF9A9AA8);
         LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(WRAP, WRAP);
-        hp.bottomMargin = dp(14);
+        hp.bottomMargin = dp(10);
         col.addView(hint, hp);
 
+        // Ordre pensé pour la TV : l'essentiel en haut, tout tient sur l'écran.
         firstMenuButton = addButton(col, "Accueil", () -> {
             hideMenu();
             if (web != null) web.loadUrl(startUrl());
         });
         addButton(col, "Suivis", this::openFollowing);
-        addButton(col, "Image dans l'image", this::startPipFromMenu);
-        menuPlayerButton = addButton(col, "", () -> {
+        menuUpdateButton = addButton(col, "", () -> {
             hideMenu();
-            toggleNativePlayer();
+            updater.checkAndInstall();
         });
         addButton(col, "Recharger la page", () -> {
             hideMenu();
             if (web != null) web.reload();
         });
+        // Taille de l'affichage : ◀ ▶ pour changer, OK pour agrandir (revient au début après le maximum).
+        menuZoomButton = addButton(col, "", () -> changeZoom(zoomIndex >= ZOOMS.length - 1 ? -zoomIndex : 1));
+        menuPlayerButton = addButton(col, "", () -> {
+            hideMenu();
+            toggleNativePlayer();
+        });
         menuCursorButton = addButton(col, "", () -> {
             hideMenu();
             toggleCursor();
         });
-
-        menuZoomLabel = label("", 15, false);
-        menuZoomLabel.setTextColor(0xFFBFBFCC);
-        LinearLayout.LayoutParams zp = new LinearLayout.LayoutParams(WRAP, WRAP);
-        zp.topMargin = dp(12);
-        zp.leftMargin = dp(4);
-        col.addView(menuZoomLabel, zp);
-        addButton(col, "Agrandir l'affichage", () -> changeZoom(1));
-        addButton(col, "Réduire l'affichage", () -> changeZoom(-1));
-
-        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(MATCH, dp(1));
-        sp.topMargin = dp(12);
-        sp.bottomMargin = dp(8);
-        View sep = new View(this);
-        sep.setBackgroundColor(0x33FFFFFF);
-        col.addView(sep, sp);
-
-        menuUpdateButton = addButton(col, "", () -> {
-            hideMenu();
-            updater.checkAndInstall();
-        });
+        menuPipButton = addButton(col, "Image dans l'image", this::startPipFromMenu);
         addButton(col, "Adresse de départ", this::askStartUrl);
         addButton(col, "Aide de la télécommande", this::showHelp);
         addButton(col, "Quitter", this::finish);
@@ -1342,8 +1407,12 @@ public class MainActivity extends Activity {
                     ? "Installer la mise à jour " + availableUpdate
                     : "Mettre à jour l'appli");
         }
-        if (menuZoomLabel != null) {
-            menuZoomLabel.setText("Taille de l'affichage : " + zoom() + " %");
+        if (menuZoomButton != null) {
+            menuZoomButton.setText("\u25C0  Taille de l'affichage : " + zoom() + "\u00A0%  \u25B6");
+        }
+        if (menuPipButton != null) {
+            // Avec le lecteur TV, l'image dans l'image se lance depuis le lecteur (Menu \u2261).
+            menuPipButton.setVisibility(nativePlayer ? View.GONE : View.VISIBLE);
         }
     }
 
@@ -1405,7 +1474,7 @@ public class MainActivity extends Activity {
                 + "OK maintenu : mode curseur (une flèche de souris) marche / arrêt. "
                 + "Pratique si un bouton n'est pas atteignable.\n\n"
                 + "Retour : fermer une fenêtre, sortir du plein écran, page précédente. "
-                + "Deux fois de suite sur la première page pour quitter.\n\n"
+                + "Deux fois de suite sur l'accueil pour quitter, ou trois appuis rapides n'importe où.\n\n"
                 + "Menu (\u2261) : accueil, Suivis, image dans l'image, recharger, taille de l'affichage, "
                 + "mode curseur, mise à jour\n\n"
                 + "Lecture/Pause, Avance et Retour rapides : contrôle de la vidéo ou du son (\u00B110\u00A0s), "
@@ -1504,8 +1573,8 @@ public class MainActivity extends Activity {
 
     private Button addButton(LinearLayout parent, String text, Runnable action) {
         Button b = makeButton(text, action);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(MATCH, dp(44));
-        lp.topMargin = dp(4);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(MATCH, dp(38));
+        lp.topMargin = dp(3);
         parent.addView(b, lp);
         return b;
     }
@@ -1514,7 +1583,7 @@ public class MainActivity extends Activity {
         Button b = new Button(this);
         b.setText(text);
         b.setAllCaps(false);
-        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         b.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
         b.setPadding(dp(16), 0, dp(16), 0);
         b.setMinHeight(0);

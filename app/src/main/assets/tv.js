@@ -401,9 +401,17 @@
   function openLayer() {
     var list = document.querySelectorAll(OPEN_LAYER);
     for (var i = list.length - 1; i >= 0; i--) {
+      if (list[i].closest('[data-tv-ignore]')) continue; // élément permanent du site
       var r = list[i].getBoundingClientRect();
       if (r.width > 0 && r.height > 0) return list[i];
     }
+    return null;
+  }
+
+  // Fenêtre qui ne se ferme ni avec Échap ni avec sa croix : Retour ne s'y arrêtera plus.
+  function ignoreLayer() {
+    var m = openLayer();
+    if (m) m.setAttribute('data-tv-ignore', '');
     return null;
   }
 
@@ -1117,6 +1125,7 @@
     cover: coverFor,
     afterPlayer: afterPlayer,
     reportProgress: reportProgress,
+    ignoreLayer: ignoreLayer,
     collapseSidebar: collapseSidebar,
     expandSidebar: expandSidebar
   };

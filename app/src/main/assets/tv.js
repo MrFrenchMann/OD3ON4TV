@@ -28,9 +28,34 @@
   ].join(',');
 
   var STYLE = [
-    '[data-tvf]{outline:4px solid #fff!important;outline-offset:3px!important;',
-    'box-shadow:0 0 0 7px rgba(0,0,0,.55),0 0 30px 8px rgba(255,255,255,.4)!important;',
-    'transition:outline-offset .12s ease,box-shadow .12s ease!important}',
+    // Surbrillance légère : voile blanc discret + fin contour blanc.
+    '[data-tvf]{outline:2px solid rgba(255,255,255,.9)!important;outline-offset:2px!important;',
+    'box-shadow:inset 0 0 0 9999px rgba(255,255,255,.14),0 0 16px 2px rgba(255,255,255,.28)!important;',
+    'transition:box-shadow .12s ease!important}',
+    // Bouton « Image dans l'image » posé sur le lecteur.
+    '#__tv_pip{position:fixed;z-index:2147483646;display:none;align-items:center;gap:8px;',
+    'padding:8px 14px;border-radius:999px;border:1px solid rgba(255,255,255,.5);',
+    'background:rgba(0,0,0,.68);color:#fff;cursor:pointer;margin:0;',
+    'font:600 15px/1 system-ui,-apple-system,Roboto,"Segoe UI",sans-serif}',
+    '#__tv_pip svg{display:block;flex:none}',
+    // Pendant l'image dans l'image : seule la vidéo (ou l'image du podcast) reste affichée.
+    'html[data-tv-pip],html[data-tv-pip] body{background:#000!important;overflow:hidden!important}',
+    'html[data-tv-pip] body *{visibility:hidden!important}',
+    'html[data-tv-pip] [data-tv-stage]{visibility:visible!important;position:fixed!important;',
+    'left:0!important;top:0!important;right:auto!important;bottom:auto!important;',
+    'width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;',
+    'min-width:0!important;min-height:0!important;margin:0!important;padding:0!important;',
+    'border:0!important;border-radius:0!important;z-index:2147483647!important;',
+    'object-fit:contain!important;background:#000!important;transform:none!important;',
+    'opacity:1!important;clip-path:none!important}',
+    'html[data-tv-pip] [data-tv-stage-anc]{transform:none!important;filter:none!important;',
+    'perspective:none!important;contain:none!important;will-change:auto!important;',
+    'clip-path:none!important;overflow:visible!important;opacity:1!important}',
+    '#__tv_cover{position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483647;background:#000;',
+    'display:flex;align-items:center;justify-content:center}',
+    '#__tv_cover img{max-width:100%;max-height:100%;object-fit:contain}',
+    '#__tv_cover div{color:#fff;padding:8vh;text-align:center;',
+    'font:600 7vh/1.3 system-ui,-apple-system,Roboto,"Segoe UI",sans-serif}',
     'html{-webkit-tap-highlight-color:transparent}',
     '::-webkit-scrollbar{width:0!important;height:0!important;background:transparent!important}',
     '#__tv_osd{position:fixed;left:50%;bottom:8%;transform:translateX(-50%);',
@@ -48,6 +73,10 @@
   var zoom = 100;          // taille d'affichage en %
   var pointerMode = false; // mode curseur actif côté appli
   var osdTimer = 0;
+  var pipSupported = false; // la Fire TV sait faire l'image dans l'image
+  var pipActive = false;
+  var tracked = [];         // médias créés par le site sans être affichés (lecteurs audio)
+  var lastMedia = null;
 
   /* ---------- outils ---------- */
 
@@ -178,16 +207,20 @@
     return 0;
   }
 
-  function pick(dir, from, fromEl, list, strict) {
+  function pick(dir, from, fromEl, list, strict, sideWeight) {
+    var sw = sideWeight === undefined ? 2.5 : sideWeight;
     var fcx = (from.left + from.right) / 2, fcy = (from.top + from.bottom) / 2;
     var best = null, bestS = Infinity;
     for (var i = 0; i < list.length; i++) {
       var c = list[i], r = c.r, el = c.el;
       if (el === fromEl || el.contains(fromEl)) continue; // ni soi-même ni un parent
       var cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
-      // Bouton à l'intérieur d'une carte : visité en premier avec gauche / droite
-      // (haut / bas passent directement à la rangée suivante).
-      var inside = fromEl.contains(el);
+      // Bouton à l'intérieur d'une carte, ou posé par-dessus (commandes d'un lecteur vidéo) :
+      // visité en premier avec gauche / droite (haut / bas passent à la rangée suivante).
+      var inside = fromEl.contains(el) || (
+        r.left >= from.left - 1 && r.right <= from.right + 1 &&
+        r.top >= from.top - 1 && r.bottom <= from.bottom + 1 &&
+        r.width * r.height < from.width * from.height * 0.6);
       if (inside && (dir === 'up' || dir === 'down') && strict) continue;
       var ok, main, side, off;
       if (dir === 'right' || dir === 'left') {
@@ -219,7 +252,7 @@
       }
       if (!ok) continue;
       if (main < 0) main = 0;
-      var score = inside ? off * 0.05 : main + side * 2.5 + off * 0.35;
+      var score = inside ? off * 0.05 : main + side * sw + off * 0.35 * (sw / 2.5);
       if (score < bestS) { bestS = score; best = c; }
     }
     return best;
@@ -311,7 +344,8 @@
         for (var k = 0; k < list.length; k++) {
           if (root !== document || !pinned(list[k].el)) free.push(list[k]);
         }
-        var next = pick(dir, line, document.createElement('i'), free, true);
+        // Ici l'ordre de lecture compte plus que la colonne : premier élément visible en haut (ou en bas).
+        var next = pick(dir, line, document.createElement('i'), free, true, 0.05);
         if (next && inView(next.r)) focusEl(next.el); else scrollStep(dir);
         return null;
       }
@@ -391,18 +425,61 @@
     return { ok: false };
   }
 
-  function mainVideo() {
-    var vids = document.querySelectorAll('video'), best = null, bestA = 0;
-    for (var i = 0; i < vids.length; i++) {
-      var v = vids[i];
-      if (!v.paused && !v.ended) return v;
-      var r = v.getBoundingClientRect();
-      var w = Math.min(r.right, window.innerWidth) - Math.max(r.left, 0);
-      var h = Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0);
-      var a = Math.max(0, w) * Math.max(0, h);
-      if (a > bestA) { bestA = a; best = v; }
+  /* ---------- médias (vidéo et audio) ---------- */
+
+  function visibleArea(el) {
+    if (!connected(el)) return 0;
+    var r = el.getBoundingClientRect();
+    var w = Math.min(r.right, window.innerWidth) - Math.max(r.left, 0);
+    var h = Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0);
+    return Math.max(0, w) * Math.max(0, h);
+  }
+
+  function isPlaying(m) {
+    return !m.paused && !m.ended;
+  }
+
+  function allMedia() {
+    var list = Array.prototype.slice.call(document.querySelectorAll('video,audio'));
+    for (var i = 0; i < tracked.length; i++) {
+      if (list.indexOf(tracked[i]) < 0) list.push(tracked[i]);
     }
-    return best;
+    return list;
+  }
+
+  // Média à piloter : celui qui joue (vidéo visible d'abord), sinon la plus grande vidéo à l'écran.
+  function mainMedia() {
+    var list = allMedia(), i, m, best = null, bestA = 0;
+    for (i = 0; i < list.length; i++) {
+      m = list[i];
+      if (isPlaying(m) && m.tagName === 'VIDEO' && visibleArea(m) > 0) return m;
+    }
+    for (i = 0; i < list.length; i++) {
+      if (isPlaying(list[i])) return list[i];
+    }
+    for (i = 0; i < list.length; i++) {
+      m = list[i];
+      if (m.tagName !== 'VIDEO') continue;
+      var a = visibleArea(m);
+      if (a > bestA) { bestA = a; best = m; }
+    }
+    return best || lastMedia;
+  }
+
+  // Média concerné par l'image dans l'image : vidéo bien visible, sinon média en lecture.
+  function pipTarget() {
+    var list = allMedia(), i, m, best = null, bestA = 120 * 68;
+    for (i = 0; i < list.length; i++) {
+      m = list[i];
+      if (m.tagName !== 'VIDEO') continue;
+      var a = visibleArea(m);
+      if (a > bestA) { bestA = a; best = m; }
+    }
+    if (best) return best;
+    for (i = 0; i < list.length; i++) {
+      if (isPlaying(list[i])) return list[i];
+    }
+    return null;
   }
 
   function toggle(v) {
@@ -417,7 +494,7 @@
   }
 
   function media(action) {
-    var v = mainVideo();
+    var v = mainMedia();
     if (!v) return { none: true, iframe: !!(connected(cur) && cur.tagName === 'IFRAME') };
     try {
       if (action === 'toggle') toggle(v);
@@ -462,6 +539,185 @@
     return null;
   }
 
+  /* ---------- image dans l'image ---------- */
+
+  var pipBtn = null;
+
+  function pipButton() {
+    if (pipBtn && connected(pipBtn)) return pipBtn;
+    pipBtn = document.createElement('button');
+    pipBtn.id = '__tv_pip';
+    pipBtn.type = 'button';
+    pipBtn.setAttribute('aria-label', 'Image dans l’image');
+    pipBtn.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">' +
+      '<rect x="2.5" y="4.5" width="19" height="15" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/>' +
+      '<rect x="12" y="11" width="8" height="6" rx="1" fill="currentColor"/></svg>' +
+      '<span>Image dans l’image</span>';
+    pipBtn.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      pipRequest();
+    }, true);
+    (document.body || document.documentElement).appendChild(pipBtn);
+    return pipBtn;
+  }
+
+  // Place le bouton en haut à droite de la vidéo visible, ou en bas à droite de l'écran
+  // quand seul un son (podcast) est en lecture.
+  function updatePipButton() {
+    var fs = document.fullscreenElement || document.webkitFullscreenElement;
+    var t = (pipSupported && !pipActive && !fs) ? pipTarget() : null;
+    if (!t) {
+      if (pipBtn && connected(pipBtn)) {
+        if (cur === pipBtn) mark(null);
+        pipBtn.style.display = 'none';
+      }
+      return;
+    }
+    addStyle();
+    var b = pipButton();
+    b.style.display = 'flex';
+    var bw = b.offsetWidth || 190, bh = b.offsetHeight || 36;
+    var x, y;
+    if (t.tagName === 'VIDEO' && visibleArea(t) > 0) {
+      var r = t.getBoundingClientRect();
+      x = Math.min(r.right, window.innerWidth) - bw - 12;
+      y = Math.max(r.top, 0) + 12;
+    } else {
+      x = window.innerWidth - bw - 24;
+      y = window.innerHeight - bh - 24;
+    }
+    b.style.left = Math.max(8, Math.round(x)) + 'px';
+    b.style.top = Math.max(8, Math.round(y)) + 'px';
+  }
+
+  function pipRequest() {
+    try {
+      if (window.CanapeTV && window.CanapeTV.enterPip) window.CanapeTV.enterPip();
+    } catch (e) { /* ignoré */ }
+  }
+
+  function largestImage(root) {
+    var imgs = root.querySelectorAll('img'), best = null, bestA = 0;
+    for (var i = 0; i < imgs.length; i++) {
+      var im = imgs[i], r = im.getBoundingClientRect();
+      if (r.width < 80 || r.height < 80 || im.id === '__tv_cover_img') continue;
+      var a = visibleArea(im) || r.width * r.height * 0.01;
+      if (a > bestA) { bestA = a; best = im; }
+    }
+    return best;
+  }
+
+  // Image qui illustre le son : pochette déclarée par le site, sinon la plus grande image
+  // à côté du lecteur, sinon la plus grande image de la page, sinon l'image de partage.
+  function coverFor(m) {
+    try {
+      var md = navigator.mediaSession && navigator.mediaSession.metadata;
+      if (md && md.artwork && md.artwork.length) {
+        var best = md.artwork[0], bestSize = 0;
+        for (var i = 0; i < md.artwork.length; i++) {
+          var s = parseInt(String(md.artwork[i].sizes || '0').split('x')[0], 10) || 0;
+          if (s >= bestSize) { bestSize = s; best = md.artwork[i]; }
+        }
+        if (best && best.src) return best.src;
+      }
+    } catch (e) { /* ignoré */ }
+    if (m && m.poster) return m.poster;
+    var img = null;
+    if (m && connected(m)) {
+      for (var p = m.parentElement, d = 0; p && d < 6 && !img; p = p.parentElement, d++) {
+        img = largestImage(p);
+      }
+    }
+    if (!img) img = largestImage(document);
+    if (img) return img.currentSrc || img.src;
+    var og = document.querySelector('meta[property="og:image"],meta[name="twitter:image"]');
+    return og && og.content ? og.content : null;
+  }
+
+  function pipStart() {
+    var m = pipTarget() || mainMedia();
+    if (!m) return { none: true };
+    pipActive = true;
+    if (pipBtn) pipBtn.style.display = 'none';
+    addStyle();
+    document.documentElement.setAttribute('data-tv-pip', '');
+    if (m.tagName === 'VIDEO' && connected(m)) {
+      m.setAttribute('data-tv-stage', '');
+      for (var a = m.parentElement; a && a !== document.documentElement; a = a.parentElement) {
+        a.setAttribute('data-tv-stage-anc', '');
+      }
+      return { kind: 'video' };
+    }
+    var c = document.getElementById('__tv_cover');
+    if (c) c.parentNode.removeChild(c);
+    c = document.createElement('div');
+    c.id = '__tv_cover';
+    var src = coverFor(m);
+    if (src) {
+      var im = document.createElement('img');
+      im.id = '__tv_cover_img';
+      im.alt = '';
+      im.src = src;
+      c.appendChild(im);
+    } else {
+      var t = document.createElement('div');
+      t.textContent = document.title || 'Lecture en cours';
+      c.appendChild(t);
+    }
+    document.documentElement.appendChild(c);
+    return { kind: 'audio', cover: src || null };
+  }
+
+  function pipEnd() {
+    pipActive = false;
+    document.documentElement.removeAttribute('data-tv-pip');
+    var list = document.querySelectorAll('[data-tv-stage],[data-tv-stage-anc]');
+    for (var i = 0; i < list.length; i++) {
+      list[i].removeAttribute('data-tv-stage');
+      list[i].removeAttribute('data-tv-stage-anc');
+    }
+    var c = document.getElementById('__tv_cover');
+    if (c) c.parentNode.removeChild(c);
+    updatePipButton();
+    return null;
+  }
+
+  function pipCheck() {
+    return { media: !!(pipTarget() || mainMedia()) };
+  }
+
+  /* ---------- onglets du site (raccourcis du menu) ---------- */
+
+  function norm(s) {
+    s = String(s || '').toLowerCase();
+    if (s.normalize) s = s.normalize('NFD').replace(/[̀-ͯ]/g, '');
+    return s.replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '');
+  }
+
+  // Cherche dans le site le lien ou bouton portant un de ces noms, et clique dessus.
+  function openTab(names) {
+    var els = document.querySelectorAll('a[href],button,[role="link"],[role="tab"],[role="menuitem"]');
+    var best = null, bestScore = 0;
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el.id === '__tv_pip') continue;
+      var label = norm(el.textContent);
+      var aria = norm(el.getAttribute('aria-label') || el.getAttribute('title'));
+      if (label.length > 40) label = '';
+      for (var k = 0; k < names.length; k++) {
+        var n = norm(names[k]);
+        var sc = (label === n || aria === n) ? 3 : ((label.indexOf(n) === 0 || aria.indexOf(n) === 0) ? 2 : 0);
+        if (sc && usable(el, el.getBoundingClientRect())) sc += 1; // visible à l'écran : préféré
+        if (sc > bestScore) { bestScore = sc; best = el; }
+      }
+    }
+    if (!best) return { found: false };
+    var href = best.tagName === 'A' ? best.href : '';
+    safeClick(best);
+    return { found: true, href: href };
+  }
+
   /* ---------- taille d'affichage ---------- */
 
   function applyZoom() {
@@ -489,12 +745,14 @@
     if (meta.getAttribute('content') !== want) meta.setAttribute('content', want);
   }
 
-  function config(z, pointer) {
+  function config(z, pointer, pip) {
     var n = parseInt(z, 10);
     zoom = (n >= 30 && n <= 300) ? n : 100;
     pointerMode = !!pointer;
+    pipSupported = !!pip;
     if (pointerMode) mark(null);
     applyZoom();
+    updatePipButton();
     return null;
   }
 
@@ -510,17 +768,43 @@
     mark(t);
   }, true);
 
-  // Garde l'écran allumé pendant la lecture d'une vidéo.
+  // Prévient l'appli quand un son ou une vidéo joue (écran allumé, télécommande, image dans l'image).
+  var MEDIA_EVENTS = ['play', 'playing', 'pause', 'ended', 'emptied'];
   function reportPlaying() {
-    var any = false, list = document.querySelectorAll('video,audio');
+    var any = false, list = allMedia();
     for (var i = 0; i < list.length; i++) {
-      if (!list[i].paused && !list[i].ended) { any = true; break; }
+      if (isPlaying(list[i])) { any = true; break; }
     }
     try { if (window.CanapeTV) window.CanapeTV.setPlaying(any); } catch (e) { /* ignoré */ }
+    updatePipButton();
   }
-  ['play', 'playing', 'pause', 'ended', 'emptied'].forEach(function (t) {
+  MEDIA_EVENTS.forEach(function (t) {
     document.addEventListener(t, reportPlaying, true);
   });
+
+  // Les lecteurs audio créés en JavaScript ne sont pas dans la page : on les repère
+  // au moment où le site lance la lecture.
+  function track(m) {
+    lastMedia = m;
+    if (tracked.indexOf(m) >= 0) return;
+    tracked.push(m);
+    if (tracked.length > 8) tracked.shift();
+    MEDIA_EVENTS.forEach(function (t) { m.addEventListener(t, reportPlaying); });
+  }
+  try {
+    var proto = window.HTMLMediaElement && window.HTMLMediaElement.prototype;
+    if (proto && !proto.__tvPatched) {
+      var originalPlay = proto.play;
+      proto.play = function () {
+        try { track(this); } catch (e) { /* ignoré */ }
+        return originalPlay.apply(this, arguments);
+      };
+      proto.__tvPatched = true;
+    }
+  } catch (e) { /* ignoré */ }
+
+  // Suit la position de la vidéo (défilement, changement de page) pour le bouton.
+  setInterval(updatePipButton, 600);
 
   // Si le site réécrit sa balise « viewport », on réapplique la taille choisie.
   try {
@@ -539,7 +823,12 @@
     media: media,
     scrollAt: scrollAt,
     config: config,
-    clearFocus: clearFocus
+    clearFocus: clearFocus,
+    pipStart: pipStart,
+    pipEnd: pipEnd,
+    pipCheck: pipCheck,
+    openTab: openTab,
+    cover: coverFor
   };
 
   addStyle();

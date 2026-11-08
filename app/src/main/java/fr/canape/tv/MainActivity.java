@@ -2,9 +2,11 @@ package fr.canape.tv;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.PictureInPictureParams;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
 import android.graphics.Color;
@@ -12,12 +14,16 @@ import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.media.session.MediaSession;
+import android.media.session.PlaybackState;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.text.InputType;
+import android.util.Rational;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.InputDevice;
@@ -102,6 +108,18 @@ public class MainActivity extends Activity {
     private long lastModalBackAt;
     private boolean centerLongHandled;
 
+    // Image dans l'image et lecture en arrière-plan
+    private boolean pipArmed;        // l'utilisateur a déjà utilisé le bouton : Accueil garde la lecture
+    private boolean enteringPip;
+    private boolean mediaPlaying;
+    private int pipBaseW;
+    private int pipBaseH;
+    private MediaSession mediaSession;
+
+    // Raccourci « Suivis » du menu
+    private static final String FOLLOWING_NAMES = "['Suivis','Suivi','Mes suivis','Following','Followed']";
+    private int followingAttempts;
+
     /* ================= cycle de vie ================= */
 
     @Override
@@ -114,6 +132,7 @@ public class MainActivity extends Activity {
         zoomIndex = clampZoom(prefs.getInt("zoomIndex", DEFAULT_ZOOM_INDEX));
         tvJs = readAsset("tv.js");
         updater = new Updater(this);
+        setupMediaSession();
 
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
@@ -190,19 +209,260 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
-        if (web != null) {
-            // Coupe le son quand on revient à l'accueil de la Fire TV.
-            web.evaluateJavascript("(function(){try{document.querySelectorAll('video,audio')"
-                    + ".forEach(function(m){m.pause();});}catch(e){}})();", null);
-            web.onPause();
-        }
+        // En image dans l'image, la vidéo ou le son continue : on ne coupe rien.
+        if (web != null && !enteringPip && !isInPip()) stopPlayback();
         CookieManager.getInstance().flush();
         super.onPause();
     }
 
     @Override
+    protected void onStop() {
+        // Petite fenêtre fermée (ou appli quittée) : là, on coupe le son.
+        if (web != null && !isInPip()) stopPlayback();
+        super.onStop();
+    }
+
+    /** Coupe le son et met la page en pause (retour à l'accueil de la Fire TV). */
+    private void stopPlayback() {
+        web.evaluateJavascript("(function(){try{document.querySelectorAll('video,audio')"
+                + ".forEach(function(m){m.pause();});if(window.__tv)window.__tv.media('pause');}catch(e){}})();", null);
+        web.onPause();
+    }
+
+    @Override
+    protected void onUserLeaveHint() {
+        super.onUserLeaveHint();
+        // Bouton Accueil pendant la lecture, après avoir utilisé l'image dans l'image :
+        // la vidéo (ou le podcast) passe dans la petite fenêtre au lieu de s'arrêter.
+        if (pipArmed && mediaPlaying && !isInPip()) startPip();
+    }
+
+    /* ================= image dans l'image ================= */
+
+    private boolean pipSupported() {
+        return Build.VERSION.SDK_INT >= 24
+                && getPackageManager().hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE);
+    }
+
+    private boolean isInPip() {
+        return Build.VERSION.SDK_INT >= 24 && isInPictureInPictureMode();
+    }
+
+    private String configCall() {
+        return "window.__tv.config(" + zoom() + "," + cursorMode + "," + pipSupported() + ")";
+    }
+
+    /* ================= raccourci « Suivis » ================= */
+
+    // Le menu se ferme et la page « Suivis » d'OD3ON s'ouvre en plein écran.
+    private void openFollowing() {
+        hideMenu();
+        if (web == null) return;
+        String known = prefs.getString("followingUrl", null);
+        if (known != null) {
+            web.loadUrl(known);
+            return;
+        }
+        followingAttempts = 0;
+        findFollowingTab(true);
+    }
+
+    /** Cherche l'onglet « Suivis » dans le menu du site et clique dessus. */
+    private void findFollowingTab(final boolean firstTry) {
+        js("window.__tv.openTab(" + FOLLOWING_NAMES + ")", result -> {
+            JSONObject o = parse(result);
+            if (o != null && o.optBoolean("found", false)) {
+                followingAttempts = 0;
+                String href = o.optString("href", "");
+                // On retient l'adresse pour y aller directement la prochaine fois.
+                if (href.startsWith("http") && !href.contains("#")) {
+                    prefs.edit().putString("followingUrl", href).apply();
+                }
+                return;
+            }
+            if (firstTry) {
+                // Pas sur cette page : on repasse par l'accueil du site.
+                followingAttempts = 1;
+                if (web != null) web.loadUrl(startUrl());
+            } else if (followingAttempts > 0 && followingAttempts < 3) {
+                followingAttempts++;
+                ui.postDelayed(() -> findFollowingTab(false), 1500);
+            } else {
+                followingAttempts = 0;
+                toast("Onglet « Suivis » introuvable. Connecte-toi d'abord à OD3ON, puis réessaie.");
+            }
+        });
+    }
+
+    /** Depuis le menu : seulement si une vidéo ou un son est présent. */
+    private void startPipFromMenu() {
+        hideMenu();
+        if (!pipSupported()) {
+            toast("Cette Fire TV ne gère pas l'image dans l'image.");
+            return;
+        }
+        js("window.__tv.pipCheck()", result -> {
+            JSONObject o = parse(result);
+            if (o != null && o.optBoolean("media", false)) startPip();
+            else toast("Lance d'abord une vidéo ou un podcast.");
+        });
+    }
+
+    private void startPip() {
+        if (!pipSupported()) {
+            toast("Cette Fire TV ne gère pas l'image dans l'image.");
+            return;
+        }
+        if (isInPip() || web == null) return;
+        pipArmed = true;
+        enteringPip = true;
+        pipBaseW = root.getWidth();
+        pipBaseH = root.getHeight();
+        hideMenu();
+        cursor.setVisibility(View.GONE);
+        topProgress.setVisibility(View.GONE);
+        freezeWebSize();
+        // La page n'affiche plus que la vidéo, ou l'image du podcast.
+        js("window.__tv.pipStart()", null);
+        boolean ok = false;
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                ok = enterPictureInPictureMode(pipParams());
+            } else {
+                enterPictureInPictureModeLegacy();
+                ok = true;
+            }
+        } catch (Exception e) {
+            ok = false;
+        }
+        if (!ok) {
+            enteringPip = false;
+            leavePipLayout();
+            toast("L'image dans l'image n'a pas pu s'ouvrir. Vérifie qu'elle est autorisée "
+                    + "pour " + getString(R.string.app_name) + " dans les paramètres de la Fire TV.");
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void enterPictureInPictureModeLegacy() {
+        enterPictureInPictureMode();
+    }
+
+    private PictureInPictureParams pipParams() {
+        int w = pipBaseW > 0 ? pipBaseW : 16;
+        int h = pipBaseH > 0 ? pipBaseH : 9;
+        return new PictureInPictureParams.Builder().setAspectRatio(new Rational(w, h)).build();
+    }
+
+    @SuppressWarnings("deprecation")
+    @Override
+    public void onPictureInPictureModeChanged(boolean inPip) {
+        super.onPictureInPictureModeChanged(inPip);
+        enteringPip = false;
+        if (inPip) {
+            applyPipScale();
+            updateMediaSession(mediaPlaying);
+        } else {
+            leavePipLayout();
+        }
+    }
+
+    /** Retour en plein écran (ou fermeture) : la page retrouve son affichage normal. */
+    private void leavePipLayout() {
+        unfreezeWebSize();
+        js("window.__tv.pipEnd()", null);
+        cursor.setVisibility(cursorMode ? View.VISIBLE : View.GONE);
+        if (web != null && customView == null) web.requestFocus();
+        updateMediaSession(mediaPlaying);
+    }
+
+    // La page garde sa taille plein écran et est simplement réduite dans la petite fenêtre :
+    // le site ne se réorganise pas et le lecteur n'est pas rechargé.
+    private final View.OnLayoutChangeListener pipLayoutListener =
+            (v, l, t, r, b, ol, ot, or, ob) -> applyPipScale();
+
+    private void freezeWebSize() {
+        if (pipBaseW <= 0 || pipBaseH <= 0) return;
+        for (View v : new View[]{web, fullscreenHolder}) {
+            if (v == null) continue;
+            v.setLayoutParams(new FrameLayout.LayoutParams(pipBaseW, pipBaseH));
+            v.setPivotX(0f);
+            v.setPivotY(0f);
+        }
+        root.removeOnLayoutChangeListener(pipLayoutListener);
+        root.addOnLayoutChangeListener(pipLayoutListener);
+    }
+
+    private void applyPipScale() {
+        if (pipBaseW <= 0 || pipBaseH <= 0 || root.getWidth() <= 0) return;
+        float s = Math.min(root.getWidth() / (float) pipBaseW, root.getHeight() / (float) pipBaseH);
+        float tx = (root.getWidth() - pipBaseW * s) / 2f;
+        float ty = (root.getHeight() - pipBaseH * s) / 2f;
+        for (View v : new View[]{web, fullscreenHolder}) {
+            if (v == null) continue;
+            v.setScaleX(s);
+            v.setScaleY(s);
+            v.setTranslationX(tx);
+            v.setTranslationY(ty);
+        }
+    }
+
+    private void unfreezeWebSize() {
+        root.removeOnLayoutChangeListener(pipLayoutListener);
+        for (View v : new View[]{web, fullscreenHolder}) {
+            if (v == null) continue;
+            v.setLayoutParams(match());
+            v.setScaleX(1f);
+            v.setScaleY(1f);
+            v.setTranslationX(0f);
+            v.setTranslationY(0f);
+        }
+    }
+
+    /* ================= télécommande pendant l'image dans l'image ================= */
+
+    // Pendant que la petite fenêtre est affichée, les touches Lecture/Pause, Avance et Retour
+    // rapides de la télécommande arrivent ici.
+    private void setupMediaSession() {
+        try {
+            mediaSession = new MediaSession(this, "Canape");
+            mediaSession.setCallback(new MediaSession.Callback() {
+                @Override public void onPlay() { js("window.__tv.media('play')", null); }
+                @Override public void onPause() { js("window.__tv.media('pause')", null); }
+                @Override public void onStop() { js("window.__tv.media('pause')", null); }
+                @Override public void onFastForward() { js("window.__tv.media('ff')", null); }
+                @Override public void onRewind() { js("window.__tv.media('rw')", null); }
+            });
+            updateMediaSession(false);
+        } catch (Exception e) {
+            mediaSession = null;
+        }
+    }
+
+    private void updateMediaSession(boolean playing) {
+        if (mediaSession == null) return;
+        try {
+            PlaybackState state = new PlaybackState.Builder()
+                    .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE
+                            | PlaybackState.ACTION_PLAY_PAUSE | PlaybackState.ACTION_STOP
+                            | PlaybackState.ACTION_FAST_FORWARD | PlaybackState.ACTION_REWIND)
+                    .setState(playing ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED,
+                            PlaybackState.PLAYBACK_POSITION_UNKNOWN, playing ? 1f : 0f)
+                    .build();
+            mediaSession.setPlaybackState(state);
+            mediaSession.setActive(playing || isInPip());
+        } catch (Exception ignored) {
+            // session indisponible sur cet appareil
+        }
+    }
+
+    @Override
     protected void onDestroy() {
         ui.removeCallbacksAndMessages(null);
+        if (mediaSession != null) {
+            mediaSession.release();
+            mediaSession = null;
+        }
         if (web != null) {
             root.removeView(web);
             web.destroy();
@@ -265,6 +525,11 @@ public class MainActivity extends Activity {
             inject();
             revealPage();
             topProgress.setVisibility(View.GONE);
+            if (followingAttempts > 0) {
+                // On vient de recharger l'accueil pour trouver l'onglet « Suivis » :
+                // on laisse au site le temps d'afficher son menu.
+                ui.postDelayed(() -> findFollowingTab(false), 1500);
+            }
         }
 
         @Override
@@ -331,12 +596,20 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void setPlaying(final boolean playing) {
             ui.post(() -> {
+                mediaPlaying = playing;
                 if (playing) {
                     getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 } else {
                     getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 }
+                updateMediaSession(playing);
             });
+        }
+
+        /** Bouton « Image dans l'image » posé sur le lecteur. */
+        @JavascriptInterface
+        public void enterPip() {
+            ui.post(MainActivity.this::startPip);
         }
     }
 
@@ -391,13 +664,13 @@ public class MainActivity extends Activity {
     private String ensureScript() {
         return "if(!window.__tv){" + tvJs + "\n;}"
                 + "if(window.__tv&&!window.__tvConfigured){window.__tvConfigured=1;"
-                + "window.__tv.config(" + zoom() + "," + cursorMode + ");}";
+                + configCall() + ";}";
     }
 
     private void inject() {
         if (web == null) return;
         web.evaluateJavascript("(function(){" + ensureScript()
-                + "if(window.__tv)window.__tv.config(" + zoom() + "," + cursorMode + ");})();", null);
+                + "if(window.__tv)" + configCall() + ";})();", null);
     }
 
     /** Exécute un appel sur window.__tv (en injectant le script s'il manque). */
@@ -682,7 +955,7 @@ public class MainActivity extends Activity {
         prefs.edit().putBoolean("cursor", cursorMode).apply();
         cursor.setVisibility(cursorMode ? View.VISIBLE : View.GONE);
         cursor.placeIfNeeded(root.getWidth(), root.getHeight());
-        js("window.__tv.config(" + zoom() + "," + cursorMode + ")", null);
+        js(configCall(), null);
         updateMenuLabels();
         toast(cursorMode
                 ? "Mode curseur activé (OK maintenu pour revenir)"
@@ -708,6 +981,8 @@ public class MainActivity extends Activity {
             hideMenu();
             if (web != null) web.loadUrl(startUrl());
         });
+        addButton(col, "Suivis", this::openFollowing);
+        addButton(col, "Image dans l'image", this::startPipFromMenu);
         addButton(col, "Recharger la page", () -> {
             hideMenu();
             if (web != null) web.reload();
@@ -782,7 +1057,7 @@ public class MainActivity extends Activity {
     private void changeZoom(int delta) {
         zoomIndex = clampZoom(zoomIndex + delta);
         prefs.edit().putInt("zoomIndex", zoomIndex).apply();
-        js("window.__tv.config(" + zoom() + "," + cursorMode + ")", null);
+        js(configCall(), null);
         updateMenuLabels();
     }
 
@@ -838,8 +1113,12 @@ public class MainActivity extends Activity {
                 + "Pratique si un bouton n'est pas atteignable.\n\n"
                 + "Retour : fermer une fenêtre, sortir du plein écran, page précédente. "
                 + "Deux fois de suite sur la première page pour quitter.\n\n"
-                + "Menu (≡) : accueil, recharger, taille de l'affichage, mode curseur\n\n"
-                + "Lecture/Pause, Avance et Retour rapides : contrôle de la vidéo (±10 s)";
+                + "Menu (\u2261) : accueil, Suivis, image dans l'image, recharger, taille de l'affichage, "
+                + "mode curseur, mise à jour\n\n"
+                + "Lecture/Pause, Avance et Retour rapides : contrôle de la vidéo ou du son (\u00B110\u00A0s), "
+                + "même dans la petite fenêtre\n\n"
+                + "Image dans l'image : bouton posé sur le lecteur. Ensuite, le bouton Accueil "
+                + "garde la lecture dans une petite fenêtre. Pour revenir en grand, rouvre l'appli.";
         new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
                 .setTitle("Télécommande")
                 .setMessage(msg)

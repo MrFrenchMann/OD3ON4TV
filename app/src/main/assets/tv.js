@@ -790,16 +790,93 @@
     tracked.push(m);
     if (tracked.length > 8) tracked.shift();
     MEDIA_EVENTS.forEach(function (t) { m.addEventListener(t, reportPlaying); });
+    m.addEventListener('play', onPlayEvent);
   }
+  /* ---------- relais vers le lecteur TV de l'appli ---------- */
+
+  var originalPlay = null;
+  var handoffEl = null;
+
+  function pageTitle() {
+    var h = document.querySelector('h1');
+    if (h && visibleArea(h) > 0 && norm(h.textContent).length > 1) return h.textContent.replace(/\s+/g, ' ').trim();
+    var og = document.querySelector('meta[property="og:title"]');
+    if (og && og.content) return og.content;
+    return (document.title || '').replace(/\s*[|\-–—]\s*od3on\s*$/i, '');
+  }
+
+  function firstSource(m) {
+    var src = m.currentSrc || m.src || '';
+    if (!src || src.indexOf('blob:') === 0) {
+      var s = m.querySelector && m.querySelector('source[src]');
+      if (s && s.src) src = s.src;
+    }
+    return src;
+  }
+
+  // Demande à l'appli si son lecteur TV prend la lecture en charge.
+  function wantsHandoff(m) {
+    if (!m || m.__tvBypass) return false;
+    var b = window.CanapeTV;
+    if (!b || !b.handoff) return false;
+    var now = Date.now();
+    if (m.__tvAsked && now - m.__tvAsked < 1000) return m.__tvHanded === true;
+    m.__tvAsked = now;
+    var isVideo = m.tagName === 'VIDEO';
+    var info = {
+      src: firstSource(m),
+      kind: isVideo ? 'video' : 'audio',
+      muted: !!m.muted,
+      title: pageTitle(),
+      cover: isVideo ? (m.poster || coverFor(m) || '') : (coverFor(m) || ''),
+      time: m.currentTime || 0,
+      page: location.href
+    };
+    var r = '0';
+    try { r = String(b.handoff(JSON.stringify(info))); } catch (e) { r = '0'; }
+    m.__tvHanded = r === '1';
+    if (m.__tvHanded) handoffEl = m;
+    return m.__tvHanded;
+  }
+
+  function onPlayEvent(e) {
+    var m = e.target;
+    if (m && typeof m.pause === 'function' && wantsHandoff(m)) {
+      try { m.pause(); } catch (x) { /* ignoré */ }
+    }
+  }
+  document.addEventListener('play', onPlayEvent, true);
+
+  // Retour du lecteur TV : même moment de la vidéo ; si le lecteur a échoué, lecture dans la page.
+  function afterPlayer(pos, failed) {
+    var m = handoffEl;
+    if (!m) return null;
+    try { if (pos > 0 && isFinite(pos)) m.currentTime = pos; } catch (e) { /* ignoré */ }
+    if (failed) {
+      m.__tvBypass = true;
+      try {
+        var p = (originalPlay || m.play).call(m);
+        if (p && p['catch']) p['catch'](function () {});
+      } catch (e) { /* ignoré */ }
+    }
+    return null;
+  }
+
   try {
     var proto = window.HTMLMediaElement && window.HTMLMediaElement.prototype;
     if (proto && !proto.__tvPatched) {
-      var originalPlay = proto.play;
+      originalPlay = proto.play;
       proto.play = function () {
         try { track(this); } catch (e) { /* ignoré */ }
+        try {
+          // Le lecteur TV prend la main : la page ne lit rien (pas d'écran noir ni de blocage).
+          if (wantsHandoff(this)) return window.Promise ? Promise.resolve() : undefined;
+        } catch (e) { /* ignoré */ }
         return originalPlay.apply(this, arguments);
       };
       proto.__tvPatched = true;
+    } else if (proto) {
+      originalPlay = proto.play;
     }
   } catch (e) { /* ignoré */ }
 
@@ -828,7 +905,8 @@
     pipEnd: pipEnd,
     pipCheck: pipCheck,
     openTab: openTab,
-    cover: coverFor
+    cover: coverFor,
+    afterPlayer: afterPlayer
   };
 
   addStyle();

@@ -39,6 +39,7 @@ import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -116,6 +117,16 @@ public class MainActivity extends Activity {
     private int pipBaseH;
     private MediaSession mediaSession;
 
+    // Lecteur TV : la page lui confie ses vidéos et ses sons
+    private boolean nativePlayer;
+    private Button menuPlayerButton;
+    private volatile long lastUserActionAt;
+    private volatile String manifestUrl;     // dernière liste de lecture vue (.m3u8 / .mpd)
+    private volatile long manifestAt;
+    private volatile String progressiveUrl;  // dernier fichier vidéo / audio vu (.mp4, .mp3…)
+    private volatile long progressiveAt;
+    private volatile String failedUrl;       // vidéo que le lecteur TV n'a pas su lire
+
     // Raccourci « Suivis » du menu
     private static final String FOLLOWING_NAMES = "['Suivis','Suivi','Mes suivis','Following','Followed']";
     private int followingAttempts;
@@ -129,6 +140,7 @@ public class MainActivity extends Activity {
 
         prefs = getSharedPreferences("canape", MODE_PRIVATE);
         cursorMode = prefs.getBoolean("cursor", false);
+        nativePlayer = prefs.getBoolean("nativePlayer", true);
         zoomIndex = clampZoom(prefs.getInt("zoomIndex", DEFAULT_ZOOM_INDEX));
         tvJs = readAsset("tv.js");
         updater = new Updater(this);
@@ -205,6 +217,114 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         if (web != null) web.onResume();
+        // Retour du lecteur TV : on replace la page au même moment de la vidéo.
+        PlayerActivity.Result r = PlayerActivity.takeResult();
+        if (r != null) {
+            boolean failed = r.error != null;
+            if (failed) {
+                failedUrl = r.url;
+                toast("Le lecteur TV n'a pas pu lire ce contenu : lecture dans la page.");
+            }
+            js("window.__tv.afterPlayer(" + (r.positionMs / 1000.0) + "," + failed + ")", null);
+        }
+    }
+
+    /* ================= lecteur TV ================= */
+
+    /** Note au passage les adresses de vidéos et de sons que la page charge. */
+    private void noteMediaUrl(String url) {
+        if (url == null || !url.startsWith("http")) return;
+        String path = url.toLowerCase();
+        int q = path.indexOf('?');
+        if (q >= 0) path = path.substring(0, q);
+        long now = SystemClock.uptimeMillis();
+        if (path.endsWith(".m3u8") || path.endsWith(".mpd")) {
+            // La première liste d'une série (la liste principale) est la bonne.
+            if (now - manifestAt > 10000) {
+                manifestUrl = url;
+                manifestAt = now;
+            }
+        } else if (path.endsWith(".mp4") || path.endsWith(".m4v") || path.endsWith(".webm")
+                || path.endsWith(".mov") || path.endsWith(".mp3") || path.endsWith(".m4a")
+                || path.endsWith(".aac") || path.endsWith(".ogg") || path.endsWith(".opus")
+                || path.endsWith(".wav") || path.endsWith(".flac")) {
+            if (now - progressiveAt > 10000 || !url.equals(progressiveUrl)) {
+                progressiveUrl = url;
+                progressiveAt = now;
+            }
+        }
+    }
+
+    /** Adresse à donner au lecteur TV, ou null si on ne la connaît pas. */
+    private String playableUrl(String src) {
+        long now = SystemClock.uptimeMillis();
+        if (src != null && src.startsWith("http")) return src;
+        String m = manifestUrl;
+        if (m != null && now - manifestAt < 120000) return m;
+        String p = progressiveUrl;
+        if (p != null && now - progressiveAt < 120000) return p;
+        return null;
+    }
+
+    /**
+     * Appelé par la page au moment où une vidéo ou un son démarre. Renvoie « 1 » si le
+     * lecteur TV prend le relais (la page ne lit alors rien elle-même).
+     */
+    private String handoffFromPage(String json) {
+        if (!nativePlayer) return "0";
+        try {
+            JSONObject o = new JSONObject(json);
+            boolean recent = SystemClock.uptimeMillis() - lastUserActionAt < 10000;
+            // Aperçus muets qui se lancent tout seuls : on les laisse dans la page.
+            if (!recent) return "0";
+            if (o.optBoolean("muted", false) && "video".equals(o.optString("kind"))
+                    && SystemClock.uptimeMillis() - lastUserActionAt > 4000) return "0";
+            final String url = playableUrl(o.optString("src", ""));
+            if (url == null || url.equals(failedUrl)) return "0";
+            if (url.equals(PlayerActivity.activeUrl)) return "1";
+            final String kind = o.optString("kind", "video");
+            final String title = o.optString("title", "");
+            final String artwork = o.optString("cover", "");
+            final long position = Math.round(o.optDouble("time", 0) * 1000);
+            final String page = o.optString("page", "");
+            ui.post(() -> startPlayer(url, kind, title, artwork, position, page));
+            return "1";
+        } catch (Exception e) {
+            return "0";
+        }
+    }
+
+    private void startPlayer(String url, String kind, String title, String artwork, long position, String page) {
+        if (isFinishing()) return;
+        PlayerActivity.activeUrl = url;
+        Intent i = new Intent(this, PlayerActivity.class)
+                .putExtra(PlayerActivity.EXTRA_URL, url)
+                .putExtra(PlayerActivity.EXTRA_KIND, kind)
+                .putExtra(PlayerActivity.EXTRA_TITLE, title)
+                .putExtra(PlayerActivity.EXTRA_ARTWORK, artwork)
+                .putExtra(PlayerActivity.EXTRA_POSITION, position)
+                .putExtra(PlayerActivity.EXTRA_REFERER, page)
+                .putExtra(PlayerActivity.EXTRA_COOKIE, CookieManager.getInstance().getCookie(url))
+                .putExtra(PlayerActivity.EXTRA_USER_AGENT, web != null ? web.getSettings().getUserAgentString() : null)
+                // Ne pas déclencher l'image dans l'image de la page en ouvrant le lecteur.
+                .addFlags(Intent.FLAG_ACTIVITY_NO_USER_ACTION);
+        try {
+            startActivity(i);
+        } catch (Exception e) {
+            PlayerActivity.activeUrl = null;
+            failedUrl = url;
+            js("window.__tv.afterPlayer(0,true)", null);
+        }
+    }
+
+    private void toggleNativePlayer() {
+        nativePlayer = !nativePlayer;
+        prefs.edit().putBoolean("nativePlayer", nativePlayer).apply();
+        failedUrl = null;
+        js(configCall(), null);
+        updateMenuLabels();
+        toast(nativePlayer ? "Les vidéos s'ouvrent dans le lecteur TV."
+                : "Les vidéos restent dans la page du site.");
     }
 
     @Override
@@ -249,7 +369,7 @@ public class MainActivity extends Activity {
     }
 
     private String configCall() {
-        return "window.__tv.config(" + zoom() + "," + cursorMode + "," + pipSupported() + ")";
+        return "window.__tv.config(" + zoom() + "," + cursorMode + "," + (pipSupported() && !nativePlayer) + ")";
     }
 
     /* ================= raccourci « Suivis » ================= */
@@ -515,6 +635,12 @@ public class MainActivity extends Activity {
         }
 
         @Override
+        public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+            noteMediaUrl(request.getUrl().toString()); // on regarde seulement, rien n'est bloqué
+            return null;
+        }
+
+        @Override
         public void onPageCommitVisible(WebView view, String url) {
             inject();
             revealPage();
@@ -610,6 +736,12 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void enterPip() {
             ui.post(MainActivity.this::startPip);
+        }
+
+        /** Une vidéo ou un son démarre dans la page : le lecteur TV prend-il le relais ? */
+        @JavascriptInterface
+        public String handoff(String json) {
+            return handoffFromPage(json);
         }
     }
 
@@ -799,6 +931,7 @@ public class MainActivity extends Activity {
     }
 
     private void activate() {
+        lastUserActionAt = SystemClock.uptimeMillis();
         if (cursorMode) {
             cursor.placeIfNeeded(root.getWidth(), root.getHeight());
             tapAt(cursor.getPointerX(), cursor.getPointerY());
@@ -859,6 +992,7 @@ public class MainActivity extends Activity {
     }
 
     private void media(int code) {
+        lastUserActionAt = SystemClock.uptimeMillis();
         final String action;
         switch (code) {
             case KeyEvent.KEYCODE_MEDIA_PLAY: action = "play"; break;
@@ -983,6 +1117,10 @@ public class MainActivity extends Activity {
         });
         addButton(col, "Suivis", this::openFollowing);
         addButton(col, "Image dans l'image", this::startPipFromMenu);
+        menuPlayerButton = addButton(col, "", () -> {
+            hideMenu();
+            toggleNativePlayer();
+        });
         addButton(col, "Recharger la page", () -> {
             hideMenu();
             if (web != null) web.reload();
@@ -1043,6 +1181,9 @@ public class MainActivity extends Activity {
     private void updateMenuLabels() {
         if (menuCursorButton != null) {
             menuCursorButton.setText(cursorMode ? "Mode curseur : activé" : "Mode curseur : désactivé");
+        }
+        if (menuPlayerButton != null) {
+            menuPlayerButton.setText(nativePlayer ? "Lecteur TV : activé" : "Lecteur TV : désactivé");
         }
         if (menuUpdateButton != null) {
             menuUpdateButton.setText(availableUpdate != null

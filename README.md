@@ -6,7 +6,7 @@ Petite appli Fire TV qui ouvre **od3on.com** en plein écran et le rend utilisab
 - **OK** : ouvre l'élément choisi (vidéo, chaîne, bouton, champ de texte avec le clavier de la Fire TV).
 - **OK maintenu** : active ou coupe le **mode curseur**, une flèche de souris pour les boutons difficiles à atteindre (lecteurs vidéo intégrés, par exemple).
 - **Retour** : ferme une fenêtre, sort du plein écran ou revient à la page précédente. Deux appuis sur la première page quittent l'appli.
-- **Menu (≡)** : accueil, recharger, taille de l'affichage (67 % à 150 %), mode curseur, adresse de départ, aide.
+- **Menu (≡)** : accueil, recharger, taille de l'affichage (67 % à 150 %), mode curseur, **mise à jour de l'appli**, adresse de départ, aide.
 - **Lecture/Pause, avance et retour rapides** : contrôlent la vidéo (± 10 s).
 - L'écran reste allumé pendant une vidéo, et le son se coupe quand tu reviens à l'accueil de la Fire TV.
 - Ta connexion à OD3ON est gardée d'une fois sur l'autre.
@@ -55,7 +55,18 @@ Le dépôt doit rester **public**, pour que la Fire TV puisse télécharger l'ap
 
 ## Mettre à jour plus tard
 
-Chaque fois que tu modifies un fichier du dépôt sur GitHub (ou que tu cliques sur **Actions > Construire l'appli Fire TV > Run workflow**), une nouvelle version est construite à la **même adresse**. Sur la Fire TV, refais simplement l'étape 3 avec le même code : la mise à jour s'installe par-dessus, et ta connexion et tes réglages sont gardés.
+Chaque fois que tu modifies un fichier du dépôt sur GitHub (ou que tu cliques sur **Actions > Construire l'appli Fire TV > Run workflow**), une nouvelle version est construite à la **même adresse**.
+
+**Depuis l'appli (le plus simple)** : Menu (≡) > **Mettre à jour l'appli**. L'appli vérifie GitHub, télécharge la nouvelle version, puis la Fire TV demande de confirmer avec **Installer**. L'appli se ferme pendant l'installation : relance-la ensuite. Au lancement, l'appli te prévient aussi quand une nouvelle version est disponible, et le bouton devient « Installer la mise à jour 1.0.x ».
+
+La toute première fois, la Fire TV demande d'autoriser Canapé à installer des applis :
+**Paramètres > Ma Fire TV > Options pour les développeurs > Installer des applis inconnues > Canapé : Activé**.
+
+**Sans passer par l'appli** : refais l'étape 3 avec le même code Downloader.
+
+Dans les deux cas, la mise à jour s'installe par-dessus : ta connexion et tes réglages sont gardés.
+
+> Cette fonction arrive avec la version 1.0.2 : la version 1.0.1 doit être mise à jour une dernière fois avec Downloader.
 
 ## Personnaliser
 

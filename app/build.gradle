@@ -5,10 +5,16 @@ plugins {
 // Numéro de version fourni par GitHub à chaque construction (1, 2, 3…),
 // pour que chaque nouvelle version s'installe par-dessus l'ancienne.
 def buildNumber = (project.findProperty('buildNumber') ?: '1').toString().toInteger()
+// Dépôt GitHub où l'appli va chercher ses mises à jour (fourni par GitHub Actions).
+def updateRepo = (project.findProperty('updateRepo') ?: 'MrFrenchMann/OD3ON4TV').toString()
 
 android {
     namespace 'fr.canape.tv'
     compileSdk 35
+
+    buildFeatures {
+        buildConfig true
+    }
 
     defaultConfig {
         applicationId 'fr.canape.tv'
@@ -16,6 +22,7 @@ android {
         targetSdk 34
         versionCode buildNumber
         versionName "1.0.${buildNumber}"
+        buildConfigField 'String', 'UPDATE_REPO', "\"${updateRepo}\""
     }
 
     // Clé de signature fixe : les mises à jour s'installent sans désinstaller

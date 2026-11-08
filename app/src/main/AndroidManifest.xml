@@ -3,6 +3,8 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Pour installer elle-même ses mises à jour (Menu > Mettre à jour l'appli). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Appli pour TV : pas d'écran tactile requis, visible dans le lanceur de la TV. -->
     <uses-feature android:name="android.software.leanback" android:required="false" />

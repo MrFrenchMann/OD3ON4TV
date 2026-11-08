@@ -27,7 +27,7 @@ jobs:
       - name: Construire l'APK
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon assembleRelease -PbuildNumber=${{ github.run_number }}
+          ./gradlew --no-daemon assembleRelease -PbuildNumber=${{ github.run_number }} -PupdateRepo=${{ github.repository }}
           cp app/build/outputs/apk/release/app-release.apk canape.apk
 
       - name: Publier dans Releases

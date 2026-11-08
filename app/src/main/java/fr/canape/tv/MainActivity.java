@@ -61,6 +61,7 @@ public class MainActivity extends Activity {
     static final String DEFAULT_URL = "https://www.od3on.com/";
     static final int[] ZOOMS = {67, 75, 80, 90, 100, 110, 125, 150};
     static final int DEFAULT_ZOOM_INDEX = 4; // 100 %
+    static final String ACTION_INSTALL_STATUS = "fr.canape.tv.INSTALL_STATUS";
 
     // Couleurs du logo
     static final int LOGO_ORANGE = 0xFFCF623E;
@@ -87,6 +88,10 @@ public class MainActivity extends Activity {
     private Button firstMenuButton;
     private Button menuCursorButton;
     private TextView menuZoomLabel;
+    private Button menuUpdateButton;
+    private Updater updater;
+    private String availableUpdate;
+    private boolean updateCheckDone;
 
     private String tvJs = "";
     private boolean cursorMode;
@@ -108,6 +113,7 @@ public class MainActivity extends Activity {
         cursorMode = prefs.getBoolean("cursor", false);
         zoomIndex = clampZoom(prefs.getInt("zoomIndex", DEFAULT_ZOOM_INDEX));
         tvJs = readAsset("tv.js");
+        updater = new Updater(this);
 
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
@@ -153,6 +159,27 @@ public class MainActivity extends Activity {
                 showHelp();
             }, 2500);
         }
+        handleInstallIntent(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        handleInstallIntent(intent);
+    }
+
+    private void handleInstallIntent(Intent intent) {
+        if (intent != null && ACTION_INSTALL_STATUS.equals(intent.getAction())) {
+            updater.onInstallStatus(intent);
+        }
+    }
+
+    /** Appelé quand une version plus récente existe sur GitHub. */
+    void onUpdateAvailable(String version) {
+        availableUpdate = version;
+        updateMenuLabels();
+        Toast.makeText(this, "Nouvelle version " + version
+                + " disponible : Menu (≡) > Installer la mise à jour", Toast.LENGTH_LONG).show();
     }
 
     @Override
@@ -671,7 +698,7 @@ public class MainActivity extends Activity {
 
         TextView title = label(getString(R.string.app_name), 28, true);
         col.addView(title);
-        TextView hint = label("Menu — Retour pour fermer", 14, false);
+        TextView hint = label("Version " + Updater.currentVersion() + " — Retour pour fermer", 14, false);
         hint.setTextColor(0xFF9A9AA8);
         LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(WRAP, WRAP);
         hp.bottomMargin = dp(14);
@@ -706,6 +733,10 @@ public class MainActivity extends Activity {
         sep.setBackgroundColor(0x33FFFFFF);
         col.addView(sep, sp);
 
+        menuUpdateButton = addButton(col, "", () -> {
+            hideMenu();
+            updater.checkAndInstall();
+        });
         addButton(col, "Adresse de départ", this::askStartUrl);
         addButton(col, "Aide de la télécommande", this::showHelp);
         addButton(col, "Quitter", this::finish);
@@ -725,7 +756,8 @@ public class MainActivity extends Activity {
         menuPanel.setVisibility(View.VISIBLE);
         menuPanel.setTranslationX(-dpf(340));
         menuPanel.animate().translationX(0f).setDuration(180).start();
-        firstMenuButton.requestFocus();
+        // Une mise à jour attend : on place directement la sélection dessus.
+        if (availableUpdate != null) menuUpdateButton.requestFocus(); else firstMenuButton.requestFocus();
     }
 
     private void hideMenu() {
@@ -736,6 +768,11 @@ public class MainActivity extends Activity {
     private void updateMenuLabels() {
         if (menuCursorButton != null) {
             menuCursorButton.setText(cursorMode ? "Mode curseur : activé" : "Mode curseur : désactivé");
+        }
+        if (menuUpdateButton != null) {
+            menuUpdateButton.setText(availableUpdate != null
+                    ? "Installer la mise à jour " + availableUpdate
+                    : "Mettre à jour l'appli");
         }
         if (menuZoomLabel != null) {
             menuZoomLabel.setText("Taille de l'affichage : " + zoom() + " %");
@@ -839,6 +876,13 @@ public class MainActivity extends Activity {
     }
 
     private void revealPage() {
+        if (!updateCheckDone) {
+            // Une fois la page affichée, on regarde discrètement s'il existe une nouvelle version.
+            updateCheckDone = true;
+            ui.postDelayed(() -> {
+                if (!isFinishing()) updater.checkInBackground();
+            }, 6000);
+        }
         if (firstPageShown) return;
         firstPageShown = true;
         splash.animate().alpha(0f).setDuration(350).withEndAction(() -> splash.setVisibility(View.GONE)).start();

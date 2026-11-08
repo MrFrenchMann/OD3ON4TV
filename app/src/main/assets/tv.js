@@ -1,5 +1,5 @@
 /*
- * Canapé : couche « TV » injectée dans la page web.
+ * Odeon : couche « TV » injectée dans la page web.
  * Rend un site pensé pour la souris utilisable avec la télécommande :
  * déplacement aux flèches d'un élément cliquable au suivant, surbrillance,
  * défilement automatique, fenêtres (modales), touches vidéo, taille d'affichage.

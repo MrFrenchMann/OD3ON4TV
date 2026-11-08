@@ -59,7 +59,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Canapé : ouvre od3on.com en plein écran sur la Fire TV et la rend pilotable
+ * Odeon : ouvre od3on.com en plein écran sur la Fire TV et la rend pilotable
  * à la télécommande (voir assets/tv.js pour la partie qui tourne dans la page).
  */
 public class MainActivity extends Activity {

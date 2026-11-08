@@ -38,6 +38,6 @@ jobs:
           gh release create "v$VERSION" canape.apk \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
-            --title "Canapé $VERSION" \
+            --title "Odeon $VERSION" \
             --notes "Lien d'installation (toujours le même) : https://github.com/${{ github.repository }}/releases/latest/download/canape.apk" \
             --latest

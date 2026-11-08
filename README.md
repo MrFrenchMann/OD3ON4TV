@@ -1,4 +1,4 @@
-# Canapé : od3on.com sur Fire TV
+# Odeon : od3on.com sur Fire TV
 
 Petite appli Fire TV qui ouvre **od3on.com** en plein écran et le rend utilisable à la télécommande :
 
@@ -51,7 +51,7 @@ Le dépôt doit rester **public**, pour que la Fire TV puisse télécharger l'ap
    *Si « Options pour les développeurs » n'apparaît pas : Paramètres > Ma Fire TV > À propos, puis appuie 7 fois sur OK sur le nom de l'appareil.*
 3. Ouvre Downloader, tape ton **code** (ou le lien complet), puis **Go**.
 4. Quand le téléchargement est fini : **Installer**, puis **Ouvrir**.
-5. Canapé apparaît dans **Vos applis et chaînes**. Pour l'avoir sur l'accueil : sélectionne-la, appuie sur **Menu (≡)**, puis **Déplacer**.
+5. Odeon apparaît dans **Vos applis et chaînes**. Pour l'avoir sur l'accueil : sélectionne-la, appuie sur **Menu (≡)**, puis **Déplacer**.
 
 ---
 
@@ -61,8 +61,8 @@ Chaque fois que tu modifies un fichier du dépôt sur GitHub (ou que tu cliques 
 
 **Depuis l'appli (le plus simple)** : Menu (≡) > **Mettre à jour l'appli**. L'appli vérifie GitHub, télécharge la nouvelle version, puis la Fire TV demande de confirmer avec **Installer**. L'appli se ferme pendant l'installation : relance-la ensuite. Au lancement, l'appli te prévient aussi quand une nouvelle version est disponible, et le bouton devient « Installer la mise à jour 1.0.x ».
 
-La toute première fois, la Fire TV demande d'autoriser Canapé à installer des applis :
-**Paramètres > Ma Fire TV > Options pour les développeurs > Installer des applis inconnues > Canapé : Activé**.
+La toute première fois, la Fire TV demande d'autoriser Odeon à installer des applis :
+**Paramètres > Ma Fire TV > Options pour les développeurs > Installer des applis inconnues > Odeon : Activé**.
 
 **Sans passer par l'appli** : refais l'étape 3 avec le même code Downloader.
 

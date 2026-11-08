@@ -54,6 +54,9 @@
     '#__tv_cover{position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483647;background:#000;',
     'display:flex;align-items:center;justify-content:center}',
     '#__tv_cover img{max-width:100%;max-height:100%;object-fit:contain}',
+    // Barre latérale du site repliée après le choix d'une section (revient avec ☰).
+    '[data-tv-side-hidden]{display:none!important}',
+    '[data-tv-expand]{margin-left:0!important;left:0!important;width:auto!important}',
     '#__tv_cover div{color:#fff;padding:8vh;text-align:center;',
     'font:600 7vh/1.3 system-ui,-apple-system,Roboto,"Segoe UI",sans-serif}',
     'html{-webkit-tap-highlight-color:transparent}',
@@ -77,6 +80,8 @@
   var pipActive = false;
   var tracked = [];         // médias créés par le site sans être affichés (lecteurs audio)
   var lastMedia = null;
+  var blockPageVideo = false; // lecteur TV actif : la page ne lit pas de vidéo elle-même
+  var suppressUntil = 0;      // après un retour du lecteur TV : pas de lecture automatique
 
   /* ---------- outils ---------- */
 
@@ -745,11 +750,12 @@
     if (meta.getAttribute('content') !== want) meta.setAttribute('content', want);
   }
 
-  function config(z, pointer, pip) {
+  function config(z, pointer, pip, nativeOn) {
     var n = parseInt(z, 10);
     zoom = (n >= 30 && n <= 300) ? n : 100;
     pointerMode = !!pointer;
     pipSupported = !!pip;
+    blockPageVideo = !!nativeOn;
     if (pointerMode) mark(null);
     applyZoom();
     updatePipButton();
@@ -839,13 +845,216 @@
     return m.__tvHanded;
   }
 
+  function userRecent() {
+    try { return !!(window.CanapeTV && window.CanapeTV.recentAction && String(window.CanapeTV.recentAction()) === '1'); }
+    catch (e) { return false; }
+  }
+
+  // Lecture que la page ne doit pas faire elle-même : aperçus automatiques des vidéos
+  // (ils figent la Fire TV) et relance automatique juste après un retour du lecteur TV.
+  function shouldBlock(m) {
+    if (!m || m.__tvBypass) return false;
+    if (Date.now() < suppressUntil) return true;
+    return blockPageVideo && m.tagName === 'VIDEO' && !userRecent();
+  }
+
   function onPlayEvent(e) {
     var m = e.target;
-    if (m && typeof m.pause === 'function' && wantsHandoff(m)) {
+    if (!m || typeof m.pause !== 'function') return;
+    if (wantsHandoff(m) || shouldBlock(m)) {
       try { m.pause(); } catch (x) { /* ignoré */ }
     }
   }
   document.addEventListener('play', onPlayEvent, true);
+
+  // Retour du lecteur TV, page rechargée : on place la vidéo de la page à l'endroit atteint,
+  // avec une lecture muette très courte pour qu'OD3ON enregistre la position (reprise sur
+  // les autres appareils). Si le lecteur TV a échoué, la lecture repart dans la page.
+  function reportProgress(pos, failed) {
+    var tries = 0;
+    suppressUntil = failed ? 0 : Date.now() + 9000;
+    (function attempt() {
+      var m = mainMedia();
+      if (!m || (!firstSource(m) && m.readyState === 0)) {
+        if (++tries < 24) setTimeout(attempt, 500);
+        return;
+      }
+      handoffEl = m;
+      var done = false;
+      function go() {
+        if (done) return;
+        done = true;
+        try { if (pos > 0 && isFinite(pos)) m.currentTime = pos; } catch (e) { /* ignoré */ }
+        var play = originalPlay || m.play;
+        if (failed) {
+          m.__tvBypass = true;
+          try { var p0 = play.call(m); if (p0 && p0['catch']) p0['catch'](function () {}); } catch (e) { /* ignoré */ }
+          return;
+        }
+        if (!(pos > 0)) return;
+        var wasMuted = m.muted;
+        m.muted = true;
+        m.__tvBypass = true;
+        var stop = function () {
+          try { m.pause(); } catch (e) { /* ignoré */ }
+          m.muted = wasMuted;
+          m.__tvBypass = false;
+        };
+        try {
+          var p = play.call(m);
+          if (p && p.then) p.then(function () { setTimeout(stop, 1500); }, stop);
+          else setTimeout(stop, 1500);
+        } catch (e) { stop(); }
+      }
+      if (m.readyState >= 1) go();
+      else {
+        m.addEventListener('loadedmetadata', go);
+        setTimeout(go, 4000);
+      }
+    })();
+    return null;
+  }
+
+  /* ---------- barre latérale du site (bouton ☰ en haut à gauche) ---------- */
+
+  var sideEl = null;
+  var sideCollapsed = false;
+  try { sideCollapsed = window.localStorage.getItem('__tvSide') === '1'; } catch (e) { /* ignoré */ }
+
+  function saveSide() {
+    try { window.localStorage.setItem('__tvSide', sideCollapsed ? '1' : '0'); } catch (e) { /* ignoré */ }
+  }
+
+  function looksLikeHamburger(el) {
+    var label = norm((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.textContent || ''));
+    if (/menu|navigation|sidebar|barre|☰/.test(label)) return true;
+    if (el.hasAttribute('aria-expanded') || el.hasAttribute('aria-controls')) return true;
+    // Icône seule (sans texte) sur un bouton : le logo du site, lui, est un lien.
+    var svg = el.querySelector('svg');
+    return !!(svg && el.tagName !== 'A' && !norm(el.textContent));
+  }
+
+  // Le bouton ☰ : petit bouton tout en haut à gauche de l'écran.
+  function findToggle() {
+    var els = document.querySelectorAll('button,[role="button"],a');
+    var best = null, bestS = Infinity;
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el.id === '__tv_pip') continue;
+      var r = el.getBoundingClientRect();
+      if (r.width < 14 || r.height < 14 || r.width > 140 || r.height > 120) continue;
+      if (r.left > window.innerWidth * 0.18 || r.top > 140) continue;
+      if (!looksLikeHamburger(el)) continue;
+      var s = r.left + r.top;
+      if (s < bestS) { bestS = s; best = el; }
+    }
+    return best;
+  }
+
+  // La barre : grand bloc vertical collé au bord gauche, avec plusieurs liens.
+  function findSidebar(toggle) {
+    if (sideEl && connected(sideEl)) return sideEl;
+    if (toggle) {
+      var id = toggle.getAttribute('aria-controls');
+      var byId = id ? document.getElementById(id) : null;
+      if (byId) return byId;
+    }
+    var list = document.querySelectorAll('aside,nav,[role="navigation"],[class*="sidebar"],[class*="Sidebar"],[class*="drawer"],[class*="Drawer"]');
+    var best = null, bestLinks = 2;
+    for (var i = 0; i < list.length; i++) {
+      var c = list[i], r = c.getBoundingClientRect();
+      if (r.width < 110 || r.width > window.innerWidth * 0.45) continue;
+      if (r.height < window.innerHeight * 0.55 || r.left > 12 || r.right < 60) continue; // visible à l'écran
+      var n = c.querySelectorAll('a[href],button').length;
+      if (n > bestLinks) { bestLinks = n; best = c; }
+    }
+    return best;
+  }
+
+  // Contenu de la page à côté de la barre : il reprend toute la largeur quand elle disparaît.
+  function markExpand(side) {
+    var sr = side.getBoundingClientRect();
+    if (sr.right < 60) return;
+    var pool = [], i, e;
+    // Zone principale déclarée, voisins de la barre, blocs de premier niveau de la page…
+    var decl = document.querySelectorAll('main,[role="main"]');
+    for (i = 0; i < decl.length; i++) pool.push(decl[i]);
+    var groups = [side.parentElement ? side.parentElement.children : [], document.body ? document.body.children : []];
+    for (var g = 0; g < groups.length; g++) for (i = 0; i < groups[g].length; i++) pool.push(groups[g][i]);
+    // … et ce qui se trouve juste à droite de la barre, à plusieurs hauteurs.
+    var ys = [sr.top + 40, window.innerHeight * 0.3, window.innerHeight * 0.6];
+    for (i = 0; i < ys.length; i++) {
+      for (e = document.elementFromPoint(Math.min(window.innerWidth - 2, sr.right + 30), ys[i]);
+           e && e !== document.body && e !== document.documentElement; e = e.parentElement) pool.push(e);
+    }
+    // On marque le plus grand bloc qui commence pile au bord droit de la barre.
+    var target = null, bestW = window.innerWidth * 0.4;
+    for (i = 0; i < pool.length; i++) {
+      e = pool[i];
+      if (e === side || side.contains(e) || e.contains(side)) continue;
+      var r = e.getBoundingClientRect();
+      if (Math.abs(r.left - sr.right) <= 6 && r.width > bestW) { bestW = r.width; target = e; }
+    }
+    if (target) target.setAttribute('data-tv-expand', '');
+  }
+
+  function collapseSidebar() {
+    var t = findToggle();
+    var s = findSidebar(t);
+    sideCollapsed = true;
+    saveSide();
+    if (!s) return;
+    sideEl = s;
+    if (t && t.getAttribute('aria-expanded') === 'true') {
+      safeClick(t); // tiroir du site : on le referme avec son propre bouton
+    } else if (!s.hasAttribute('data-tv-side-hidden') && s.getBoundingClientRect().width > 0) {
+      markExpand(s);
+      s.setAttribute('data-tv-side-hidden', '');
+    }
+    if (cur && s.contains(cur)) mark(null);
+  }
+
+  function expandSidebar() {
+    sideCollapsed = false;
+    saveSide();
+    var list = document.querySelectorAll('[data-tv-side-hidden],[data-tv-expand]');
+    for (var i = 0; i < list.length; i++) {
+      list[i].removeAttribute('data-tv-side-hidden');
+      list[i].removeAttribute('data-tv-expand');
+    }
+    // On place la sélection sur la première section de la barre.
+    setTimeout(function () {
+      var s = findSidebar(null);
+      if (!s) return;
+      var items = candidates(s);
+      if (items.length) focusEl(items[0].el);
+    }, 350);
+  }
+
+  document.addEventListener('click', function (e) {
+    var t = e.target && e.target.closest ? e.target.closest('a,button,[role="button"],[role="link"],[role="menuitem"]') : null;
+    if (!t || t.id === '__tv_pip') return;
+    var toggle = findToggle();
+    if (toggle && (t === toggle || toggle.contains(t))) {
+      if (sideCollapsed) expandSidebar();
+      return;
+    }
+    var s = findSidebar(toggle);
+    if (s && s.contains(t)) setTimeout(collapseSidebar, 450); // section choisie : la barre se replie
+  }, true);
+
+  // La barre reste repliée de page en page tant qu'on ne rappuie pas sur ☰.
+  setInterval(function () {
+    if (!sideCollapsed) return;
+    var s = findSidebar(null);
+    if (s && !s.hasAttribute('data-tv-side-hidden') && s.getBoundingClientRect().width > 0) {
+      var t = findToggle();
+      if (t && t.getAttribute('aria-expanded') === 'true') return; // ouverte exprès avec ☰
+      sideEl = s;
+      markExpand(s);
+      s.setAttribute('data-tv-side-hidden', '');
+    }
+  }, 800);
 
   // Retour du lecteur TV : même moment de la vidéo ; si le lecteur a échoué, lecture dans la page.
   function afterPlayer(pos, failed) {
@@ -870,7 +1079,7 @@
         try { track(this); } catch (e) { /* ignoré */ }
         try {
           // Le lecteur TV prend la main : la page ne lit rien (pas d'écran noir ni de blocage).
-          if (wantsHandoff(this)) return window.Promise ? Promise.resolve() : undefined;
+          if (wantsHandoff(this) || shouldBlock(this)) return window.Promise ? Promise.resolve() : undefined;
         } catch (e) { /* ignoré */ }
         return originalPlay.apply(this, arguments);
       };
@@ -906,7 +1115,10 @@
     pipCheck: pipCheck,
     openTab: openTab,
     cover: coverFor,
-    afterPlayer: afterPlayer
+    afterPlayer: afterPlayer,
+    reportProgress: reportProgress,
+    collapseSidebar: collapseSidebar,
+    expandSidebar: expandSidebar
   };
 
   addStyle();

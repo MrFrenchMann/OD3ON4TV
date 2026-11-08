@@ -41,6 +41,9 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.VideoSize;
 import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.exoplayer.DecoderCounters;
+import androidx.media3.exoplayer.DefaultRenderersFactory;
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.session.MediaSession;
@@ -71,10 +74,17 @@ public class PlayerActivity extends Activity {
     /** Résultat lu par l'écran principal à son retour (position atteinte, ou erreur). */
     static final class Result {
         long positionMs;
+        long durationMs;
         String error;
         String url;
     }
 
+    /** Prévenu dès que le lecteur se ferme, même si l'écran principal est en arrière-plan. */
+    interface Listener {
+        void onClosed(Result r);
+    }
+
+    static volatile Listener listener;
     private static volatile Result pending;
     static volatile String activeUrl;   // vidéo en cours dans le lecteur
     static boolean pipArmed;            // bouton « Image dans l'image » déjà utilisé
@@ -96,6 +106,10 @@ public class PlayerActivity extends Activity {
     private boolean audioOnly;
     private boolean wasInPip;
     private boolean resultWritten;
+    private DefaultTrackSelector trackSelector;
+    private long lastFrames = -1;
+    private int stallTicks;
+    private int recoveries;
 
     /* ================= cycle de vie ================= */
 
@@ -136,7 +150,6 @@ public class PlayerActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         // Nouvelle vidéo demandée alors que le lecteur était encore ouvert (petite fenêtre).
-        writeResult(null);
         resultWritten = false;
         load(intent);
     }
@@ -172,7 +185,18 @@ public class PlayerActivity extends Activity {
         if (ua != null) http.setUserAgent(ua);
 
         releasePlayer();
-        player = new ExoPlayer.Builder(this)
+        recoveries = 0;
+        stallTicks = 0;
+        lastFrames = -1;
+        // Qualité plafonnée à la Full HD : au-delà, une Fire TV Stick peine et l'image se fige.
+        trackSelector = new DefaultTrackSelector(this);
+        trackSelector.setParameters(trackSelector.buildUponParameters()
+                .setMaxVideoSize(1920, 1080)
+                .setMaxVideoFrameRate(60));
+        DefaultRenderersFactory renderers = new DefaultRenderersFactory(this)
+                .setEnableDecoderFallback(true);
+        player = new ExoPlayer.Builder(this, renderers)
+                .setTrackSelector(trackSelector)
                 .setMediaSourceFactory(new DefaultMediaSourceFactory(http))
                 .setSeekBackIncrementMs(10000)
                 .setSeekForwardIncrementMs(10000)
@@ -227,6 +251,57 @@ public class PlayerActivity extends Activity {
             session = null;
         }
         view.showController();
+        ui.removeCallbacks(watchdog);
+        ui.postDelayed(watchdog, 4000);
+    }
+
+    /* ================= image figée : détection et relance ================= */
+
+    // Toutes les 1,5 s : si la vidéo « joue » mais qu'aucune nouvelle image n'est affichée
+    // pendant environ 4,5 s, on relance le décodage au même endroit, puis on baisse la qualité.
+    private final Runnable watchdog = new Runnable() {
+        @Override
+        public void run() {
+            if (player == null) return;
+            if (!audioOnly && player.isPlaying() && player.getPlaybackState() == Player.STATE_READY) {
+                DecoderCounters dc = player.getVideoDecoderCounters();
+                long frames = -1;
+                if (dc != null) {
+                    dc.ensureUpdated();
+                    frames = dc.renderedOutputBufferCount;
+                }
+                if (frames == lastFrames) stallTicks++; else stallTicks = 0;
+                lastFrames = frames;
+                if (stallTicks >= 3) {
+                    stallTicks = 0;
+                    recoverFromStall();
+                }
+            } else {
+                stallTicks = 0;
+            }
+            ui.postDelayed(this, 1500);
+        }
+    };
+
+    private void recoverFromStall() {
+        recoveries++;
+        long pos = player.getCurrentPosition();
+        if (recoveries == 2) {
+            lowerQuality(1280, 720);
+            Toast.makeText(this, "Qualité réduite pour une lecture fluide", Toast.LENGTH_SHORT).show();
+        } else if (recoveries == 3) {
+            lowerQuality(854, 480);
+        } else if (recoveries > 4) {
+            fail("IMAGE_FIGEE");
+            return;
+        }
+        player.seekTo(pos); // vide le décodeur et repart du même moment
+        player.play();
+    }
+
+    private void lowerQuality(int w, int h) {
+        if (trackSelector == null) return;
+        trackSelector.setParameters(trackSelector.buildUponParameters().setMaxVideoSize(w, h));
     }
 
     @Override
@@ -253,6 +328,7 @@ public class PlayerActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        ui.removeCallbacks(watchdog);
         writeResult(null);
         if (url != null && url.equals(activeUrl)) activeUrl = null;
         if (session != null) {
@@ -355,8 +431,8 @@ public class PlayerActivity extends Activity {
                 w = vs.width;
                 h = vs.height;
                 float ratio = w / (float) h;
-                if (ratio > 2.39f) { w = 239; h = 100; }
-                if (ratio < 1f / 2.39f) { w = 100; h = 239; }
+                if (ratio > 2.3f) { w = 23; h = 10; }
+                if (ratio < 1f / 2.3f) { w = 10; h = 23; }
             }
         }
         return new PictureInPictureParams.Builder().setAspectRatio(new Rational(w, h)).build();
@@ -391,11 +467,14 @@ public class PlayerActivity extends Activity {
     private void writeResult(String error) {
         if (resultWritten) return;
         resultWritten = true;
-        Result r = new Result();
+        final Result r = new Result();
         r.positionMs = player != null ? Math.max(0, player.getCurrentPosition()) : 0;
+        long d = player != null ? player.getDuration() : C.TIME_UNSET;
+        r.durationMs = d == C.TIME_UNSET ? 0 : d;
         r.error = error;
         r.url = url;
-        pending = r;
+        final Listener l = listener;
+        if (l != null) ui.post(() -> l.onClosed(r)); else pending = r;
     }
 
     /* ================= interface ================= */
@@ -468,18 +547,34 @@ public class PlayerActivity extends Activity {
                 c.setReadTimeout(15000);
                 if (referer != null) c.setRequestProperty("Referer", referer);
                 if (cookie != null) c.setRequestProperty("Cookie", cookie);
+                byte[] data;
                 try (InputStream in = c.getInputStream()) {
-                    final Bitmap b = BitmapFactory.decodeStream(in);
-                    if (b != null) {
-                        ui.post(() -> {
-                            if (!isFinishing() && view != null) view.setDefaultArtwork(new BitmapDrawable(app.getResources(), b));
-                        });
+                    java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                    byte[] buf = new byte[16384];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        out.write(buf, 0, n);
+                        if (out.size() > 12 * 1024 * 1024) throw new java.io.IOException("image trop lourde");
                     }
+                    data = out.toByteArray();
                 } finally {
                     c.disconnect();
                 }
-            } catch (Exception ignored) {
-                // pas d'image : fond noir
+                BitmapFactory.Options bounds = new BitmapFactory.Options();
+                bounds.inJustDecodeBounds = true;
+                BitmapFactory.decodeByteArray(data, 0, data.length, bounds);
+                int sample = 1;
+                while (bounds.outWidth / (sample * 2) >= 1080 || bounds.outHeight / (sample * 2) >= 1080) sample *= 2;
+                BitmapFactory.Options opts = new BitmapFactory.Options();
+                opts.inSampleSize = sample;
+                final Bitmap b = BitmapFactory.decodeByteArray(data, 0, data.length, opts);
+                if (b != null) {
+                    ui.post(() -> {
+                        if (!isFinishing() && view != null) view.setDefaultArtwork(new BitmapDrawable(app.getResources(), b));
+                    });
+                }
+            } catch (Throwable ignored) {
+                // pas d'image (ou trop lourde) : fond noir
             }
         }, "odeon-artwork").start();
     }

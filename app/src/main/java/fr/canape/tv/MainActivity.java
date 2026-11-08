@@ -126,6 +126,12 @@ public class MainActivity extends Activity {
     private volatile String progressiveUrl;  // dernier fichier vidéo / audio vu (.mp4, .mp3…)
     private volatile long progressiveAt;
     private volatile String failedUrl;       // vidéo que le lecteur TV n'a pas su lire
+    private String returnUrl;                // page à rouvrir au retour du lecteur TV
+    private String returnKey;                // clé de la position gardée sur la TV
+    private boolean pageBlanked;             // page vidée pendant la lecture (mémoire, décodeur)
+    private PlayerActivity.Result pendingReport;
+    private int reportTries;
+    private boolean resumed;
 
     // Raccourci « Suivis » du menu
     private static final String FOLLOWING_NAMES = "['Suivis','Suivi','Mes suivis','Following','Followed']";
@@ -143,8 +149,10 @@ public class MainActivity extends Activity {
         nativePlayer = prefs.getBoolean("nativePlayer", true);
         zoomIndex = clampZoom(prefs.getInt("zoomIndex", DEFAULT_ZOOM_INDEX));
         tvJs = readAsset("tv.js");
+        installCrashRecorder();
         updater = new Updater(this);
         setupMediaSession();
+        PlayerActivity.listener = this::onPlayerClosed;
 
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
@@ -191,6 +199,7 @@ public class MainActivity extends Activity {
             }, 2500);
         }
         handleInstallIntent(getIntent());
+        showLastCrash();
     }
 
     @Override
@@ -216,17 +225,132 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        resumed = true;
         if (web != null) web.onResume();
-        // Retour du lecteur TV : on replace la page au même moment de la vidéo.
         PlayerActivity.Result r = PlayerActivity.takeResult();
         if (r != null) {
-            boolean failed = r.error != null;
-            if (failed) {
-                failedUrl = r.url;
-                toast("Le lecteur TV n'a pas pu lire ce contenu : lecture dans la page.");
-            }
-            js("window.__tv.afterPlayer(" + (r.positionMs / 1000.0) + "," + failed + ")", null);
+            onPlayerClosed(r);
+        } else if (pageBlanked && PlayerActivity.activeUrl != null) {
+            // Le lecteur est en petite fenêtre et on revient sur l'appli : on rouvre la page.
+            restorePage();
         }
+    }
+
+    /** Le lecteur TV vient de se fermer : on rouvre la page et on synchronise la position. */
+    void onPlayerClosed(PlayerActivity.Result r) {
+        if (r == null || isFinishing()) return;
+        boolean failed = r.error != null;
+        if (failed) {
+            failedUrl = r.url;
+            showPlayerError(r.error);
+        }
+        savePosition(returnKey, r.positionMs, r.durationMs);
+        pendingReport = r;
+        reportTries = 0;
+        if (pageBlanked) restorePage();
+        reportNow();
+    }
+
+    private void restorePage() {
+        pageBlanked = false;
+        if (web == null) return;
+        if ("about:blank".equals(web.getUrl()) && web.canGoBack()) web.goBack();
+        else if (returnUrl != null && "about:blank".equals(web.getUrl())) web.loadUrl(returnUrl);
+    }
+
+    private void reportNow() {
+        PlayerActivity.Result r = pendingReport;
+        if (r == null || web == null) return;
+        // Page pas encore rouverte : on réessaie un peu plus tard.
+        if (web.getProgress() < 100 || "about:blank".equals(web.getUrl())) {
+            if (++reportTries < 30) ui.postDelayed(this::reportNow, 700);
+            return;
+        }
+        pendingReport = null;
+        reportTries = 0;
+        // Appli en arrière-plan (bouton Accueil) : la page doit pouvoir lire pour qu'OD3ON
+        // enregistre la position, puis on la remet en pause.
+        if (!resumed) {
+            web.onResume();
+            ui.postDelayed(() -> {
+                if (!resumed && web != null) web.onPause();
+            }, 8000);
+        }
+        js("window.__tv.reportProgress(" + (r.positionMs / 1000.0) + "," + (r.error != null) + ")", null);
+    }
+
+    /* ================= position gardée sur la TV (secours) ================= */
+
+    private static String positionKey(String page, String media) {
+        String base = page != null && !page.isEmpty() ? page : media;
+        if (base == null) return null;
+        int hash = base.indexOf('#');
+        if (hash >= 0) base = base.substring(0, hash);
+        return "pos:" + Integer.toHexString(base.hashCode());
+    }
+
+    private void savePosition(String key, long posMs, long durationMs) {
+        if (key == null) return;
+        SharedPreferences sp = getSharedPreferences("positions", MODE_PRIVATE);
+        boolean nearEnd = durationMs > 0 && posMs > durationMs - 30000;
+        if (posMs < 10000 || nearEnd) sp.edit().remove(key).apply();
+        else sp.edit().putLong(key, posMs).apply();
+    }
+
+    private long savedPosition(String key) {
+        if (key == null) return 0;
+        return getSharedPreferences("positions", MODE_PRIVATE).getLong(key, 0);
+    }
+
+    /* ================= erreurs (photo à envoyer pour corriger) ================= */
+
+    private void showPlayerError(String code) {
+        if (isFinishing()) return;
+        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                .setTitle("Le lecteur TV n'a pas pu lire ce contenu")
+                .setMessage("La lecture repart dans la page.\n\nCode : " + code
+                        + "\n\nSi ça se reproduit, prends cet écran en photo et envoie-le à Claude.")
+                .setPositiveButton("OK", null)
+                .show();
+    }
+
+    private void installCrashRecorder() {
+        final Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+            try {
+                java.io.StringWriter sw = new java.io.StringWriter();
+                error.printStackTrace(new java.io.PrintWriter(sw));
+                String text = sw.toString();
+                if (text.length() > 1800) text = text.substring(0, 1800);
+                getSharedPreferences("canape", MODE_PRIVATE).edit()
+                        .putString("lastCrash", "Version " + BuildConfig.VERSION_NAME + "\n" + text).commit();
+            } catch (Throwable ignored) {
+                // rien de plus à faire
+            }
+            if (previous != null) previous.uncaughtException(thread, error);
+        });
+    }
+
+    private void showLastCrash() {
+        final String crash = prefs.getString("lastCrash", null);
+        if (crash == null) return;
+        prefs.edit().remove("lastCrash").apply();
+        ui.postDelayed(() -> {
+            if (isFinishing()) return;
+            TextView t = new TextView(this);
+            t.setText(crash);
+            t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+            t.setTextColor(0xFFDDDDDD);
+            t.setPadding(dp(20), dp(8), dp(20), dp(8));
+            ScrollView sv = new ScrollView(this);
+            sv.addView(t);
+            new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                    .setTitle("L'appli s'est fermée la dernière fois")
+                    .setMessage("Prends cet écran en photo et envoie-le à Claude pour qu'il corrige :")
+                    .setView(sv)
+                    .setPositiveButton("OK", null)
+                    .show();
+        }, 3000);
     }
 
     /* ================= lecteur TV ================= */
@@ -285,9 +409,16 @@ public class MainActivity extends Activity {
             final String kind = o.optString("kind", "video");
             final String title = o.optString("title", "");
             final String artwork = o.optString("cover", "");
-            final long position = Math.round(o.optDouble("time", 0) * 1000);
             final String page = o.optString("page", "");
-            ui.post(() -> startPlayer(url, kind, title, artwork, position, page));
+            long pos = Math.round(o.optDouble("time", 0) * 1000);
+            // OD3ON donne la position (reprise entre appareils) ; sinon, celle gardée sur la TV.
+            final String key = positionKey(page, url);
+            if (pos < 5000) pos = Math.max(pos, savedPosition(key));
+            final long position = pos;
+            ui.post(() -> {
+                returnKey = key;
+                startPlayer(url, kind, title, artwork, position, page);
+            });
             return "1";
         } catch (Exception e) {
             return "0";
@@ -314,6 +445,16 @@ public class MainActivity extends Activity {
             PlayerActivity.activeUrl = null;
             failedUrl = url;
             js("window.__tv.afterPlayer(0,true)", null);
+            return;
+        }
+        // Pendant la lecture, la page est vidée : la Fire TV garde toute sa mémoire et son
+        // décodeur vidéo pour le lecteur (c'est ce qui figeait l'image).
+        if (web != null && !pageBlanked) {
+            returnUrl = web.getUrl();
+            pageBlanked = true;
+            ui.postDelayed(() -> {
+                if (pageBlanked && web != null) web.loadUrl("about:blank");
+            }, 400);
         }
     }
 
@@ -329,6 +470,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        resumed = false;
         // En image dans l'image, la vidéo ou le son continue : on ne coupe rien.
         if (web != null && !enteringPip && !isInPip()) stopPlayback();
         CookieManager.getInstance().flush();
@@ -369,7 +511,7 @@ public class MainActivity extends Activity {
     }
 
     private String configCall() {
-        return "window.__tv.config(" + zoom() + "," + cursorMode + "," + (pipSupported() && !nativePlayer) + ")";
+        return "window.__tv.config(" + zoom() + "," + cursorMode + "," + (pipSupported() && !nativePlayer) + "," + nativePlayer + ")";
     }
 
     /* ================= raccourci « Suivis » ================= */
@@ -579,6 +721,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         ui.removeCallbacksAndMessages(null);
+        if (PlayerActivity.listener != null) PlayerActivity.listener = null;
         if (mediaSession != null) {
             mediaSession.release();
             mediaSession = null;
@@ -651,6 +794,9 @@ public class MainActivity extends Activity {
             inject();
             revealPage();
             topProgress.setVisibility(View.GONE);
+            if (pendingReport != null && url != null && !url.startsWith("about:")) {
+                ui.postDelayed(MainActivity.this::reportNow, 2500);
+            }
             if (followingAttempts > 0) {
                 // On vient de recharger l'accueil pour trouver l'onglet « Suivis » :
                 // on laisse au site le temps d'afficher son menu.
@@ -736,6 +882,12 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void enterPip() {
             ui.post(MainActivity.this::startPip);
+        }
+
+        /** Appui récent sur OK : une vidéo qui démarre maintenant a été demandée. */
+        @JavascriptInterface
+        public String recentAction() {
+            return SystemClock.uptimeMillis() - lastUserActionAt < 10000 ? "1" : "0";
         }
 
         /** Une vidéo ou un son démarre dans la page : le lecteur TV prend-il le relais ? */
